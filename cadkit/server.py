@@ -106,6 +106,41 @@ def _entity_info(e):
                 info["Coords"] = list(d.Coordinates)
             except Exception:
                 pass
+        elif "Hatch" in name:
+            # 填充图案名 / 比例 / 面积 —— 复刻工程图时要靠它对齐土层的填充约定
+            for k in ("PatternName", "PatternScale", "PatternAngle"):
+                try:
+                    info[k] = getattr(d, k)
+                except Exception:
+                    pass
+            try:
+                info["Area"] = float(d.Area)
+            except Exception:
+                pass
+            try:
+                # 边界可能有很多条，只回报数量，免得分量太大
+                info["Loops"] = int(d.NumberOfLoops)
+            except Exception:
+                pass
+        elif "Dimension" in name:
+            try:
+                info["Measurement"] = float(d.Measurement)
+            except Exception:
+                pass
+            for k in ("TextOverride", "TextHeight"):
+                try:
+                    info[k] = getattr(d, k)
+                except Exception:
+                    pass
+        elif "BlockReference" in name:
+            try:
+                info["BlockName"] = d.Name
+            except Exception:
+                pass
+            try:
+                info["Insert"] = list(d.InsertionPoint)
+            except Exception:
+                pass
     except Exception:
         pass
     return info
@@ -140,6 +175,21 @@ class BridgeServer:
             autostart=self.cfg.get("autostart_cad", True), log=self.log)
         self.last_health = time.time()
 
+    def _current_doc(self):
+        """跟随 AutoCAD 当前的活动文档。
+
+        原先把文档对象在连接时缓存住，用户在 CAD 里打开/切换图纸后，
+        桥接仍然对着旧图纸操作 —— 画出来的东西「不知道去哪了」。
+        每个请求前重新取一次活动文档，行为就跟用户看到的一致。
+        """
+        try:
+            d = self.app.ActiveDocument
+            if d is not None:
+                self.doc = d
+        except Exception:
+            pass          # 取不到就继续用缓存的，别让整个请求失败
+        return self.doc
+
     def _ensure_alive(self):
         """请求前轻量探测；CAD 已死则重连。"""
         if self.app is None:
@@ -164,11 +214,53 @@ class BridgeServer:
     # ------------------------------------------------------------ 指令
     def handle(self, cmd):
         c = cmd.get("cmd", "")
-        app, doc = self.app, self.doc
+        app = self.app
+        doc = self._current_doc()
         ms = doc.ModelSpace
 
         if c == "ping":
             return {"ok": True, "pong": True, "time": time.time()}
+
+        # ---------------- 文档管理 ----------------
+        if c == "docs":
+            out = []
+            for i in range(int(app.Documents.Count)):
+                try:
+                    d = app.Documents.Item(i)
+                    out.append({"index": i, "name": d.Name, "full": d.FullName,
+                                "active": i == int(app.ActiveDocument.Index)})
+                except Exception:
+                    out.append({"index": i, "name": None})
+            return {"ok": True, "count": len(out), "documents": out}
+
+        if c == "open":
+            path = os.path.abspath(str(cmd["path"]))
+            if not os.path.exists(path):
+                return {"ok": False, "error": "文件不存在：%s" % path}
+            try:
+                d = app.Documents.Open(path)
+            except Exception as e:
+                return {"ok": False, "error": "打开失败：%s" % e}
+            if cmd.get("focus", True):
+                self.doc = d
+            return {"ok": True, "name": d.Name, "full": d.FullName,
+                    "entities": int(d.ModelSpace.Count)}
+
+        if c == "activate":
+            # 切到某张已打开的图纸（按名字）
+            name = str(cmd["name"])
+            for i in range(int(app.Documents.Count)):
+                d = app.Documents.Item(i)
+                if d.Name.lower() == name.lower() or d.FullName.lower() == name.lower():
+                    d.Activate()
+                    self.doc = d
+                    return {"ok": True, "name": d.Name}
+            return {"ok": False, "error": "没有打开名为 %r 的图纸" % name}
+
+        if c == "new":
+            d = app.Documents.Add()
+            self.doc = d
+            return {"ok": True, "name": d.Name}
 
         if c == "info":
             try:
@@ -222,6 +314,97 @@ class BridgeServer:
         if c == "add_point":
             e = ms.AddPoint(_pt(*cmd["point"]))
             return {"ok": True, "handle": e.Handle, "object": e.ObjectName}
+
+        # ---------------- 图层 / 线型 / 填充 ----------------
+        # 复刻工程图标准要用：图层表（名/线型/颜色）和图案填充是那套图纸的骨架。
+        #
+        # 注意：IAcadLayer / IAcadHatch 和 IAcad3DSolid 一样，**早绑定包装里
+        # 不带 Color**，必须 dynamic.Dispatch 迟绑定。这个坑在三维实体、
+        # 尺寸标注、图层、填充上已经踩到第四次了，凡是设属性一律走迟绑定。
+        if c == "layer":
+            name = str(cmd["name"])
+            try:
+                ly = doc.Layers.Item(name)
+            except Exception:
+                ly = doc.Layers.Add(name)
+            dly = dynamic.Dispatch(ly)
+            if cmd.get("color") is not None:
+                dly.Color = int(cmd["color"])
+            if cmd.get("linetype"):
+                lt = str(cmd["linetype"])
+                if lt.lower() != "continuous":
+                    # 线型没加载就先用着 Continuous，别让整条指令失败
+                    try:
+                        doc.Linetypes.Item(lt)
+                    except Exception:
+                        try:
+                            doc.Linetypes.Load(
+                                lt, str(cmd.get("linetype_file", "acad.lin")))
+                        except Exception:
+                            lt = "Continuous"
+                try:
+                    dly.Linetype = lt
+                except Exception:
+                    pass
+            if cmd.get("active"):
+                doc.ActiveLayer = ly
+            out = {"ok": True, "name": str(dly.Name)}
+            for k in ("Linetype", "Color"):
+                try:
+                    out[k.lower()] = getattr(dly, k)
+                except Exception:
+                    pass
+            return out
+
+        if c == "layers":
+            return {"ok": True}
+
+        if c == "linetype":
+            name = str(cmd["name"])
+            f = str(cmd.get("file", "acad.lin"))
+            try:
+                doc.Linetypes.Load(name, f)
+            except Exception as e:
+                # 已经加载过也会报错，不当成失败
+                return {"ok": True, "name": name, "note": str(e)[:120]}
+            return {"ok": True, "name": name}
+
+        if c == "hatch":
+            geo = doc.HandleToObject(str(cmd["boundary"]))
+            # 0 = 预定义（.pat 里的图案），1 = 用户自定义，2 = 自定义
+            ptype = int(cmd.get("pattern_type", 0))
+            pat = str(cmd.get("pattern", "ANSI31"))
+            try:
+                h = ms.AddHatch(ptype, pat, bool(cmd.get("associative", True)))
+            except Exception as e:
+                return {"ok": False, "error": "填充图案 %r 不可用：%s" % (pat, e)}
+            for k, attr in (("scale", "PatternScale"), ("angle", "PatternAngle")):
+                if cmd.get(k) is not None:
+                    try:
+                        setattr(h, attr, float(cmd[k]))
+                    except Exception:
+                        pass
+            try:
+                h.AppendOuterLoop(_arr_dispatch([geo]))
+                h.Evaluate()
+            except Exception as e:
+                try:
+                    h.Delete()
+                except Exception:
+                    pass
+                return {"ok": False, "error": "填充边界失败：%s" % e}
+            out = {"ok": True, "handle": h.Handle}
+            # 颜色/图层放最后设：有些属性会触发重算，先设容易被覆盖
+            dh = dynamic.Dispatch(h)
+            if cmd.get("layer"):
+                dh.Layer = str(cmd["layer"])
+            if cmd.get("color") is not None:
+                dh.Color = int(cmd["color"])
+            try:
+                out["area"] = float(h.Area)
+            except Exception:
+                pass
+            return out
 
         # ---------------- 尺寸标注 ----------------
         # 走 COM 的 AddDim*，而不是 sendcommand 敲 DIMLINEAR ——

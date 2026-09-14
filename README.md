@@ -126,6 +126,16 @@ python -m unittest discover -s tests -v
 
 ## 示例
 
+**基坑支护剖面图**（按工程图标准生成）：
+
+```bash
+python draw_section.py       # AB段桩撑/锚结构剖面：土层填充 + 冠梁 + 支护桩 + 尺寸
+```
+
+`cadkit/standard.py` 把一整套工程图标准编码成了常量表（21 个图层、土层填充图案、
+坐标约定），来源是 `eg/Drawing Module.vb` —— 天汉基坑设计软件的配套绘图模块。
+详见 [`使用指南.md`](使用指南.md) §5.8。
+
 **长方形 + 尺寸标注**（最小示例，适合先跑这个）：
 
 ```bash
@@ -163,12 +173,14 @@ cadkit/             # 全部实现
   acad.py           #   AutoCAD 探测 / 连接 / 自动拉起
   protocol.py       #   state.json 握手 + TCP 长连接 + 接入 token
   daemon.py         #   桥接进程管理 + 单实例
+  standard.py       #   工程图标准（图层表 / 土层图案表）
   doctor.py         #   自检
   config.py         #   配置
   paths.py          #   冻结感知的路径解析
 bridge.py / cad.py  # 兼容入口（旧用法仍可用）
 assets/             # 图标与其生成脚本
 installer/          # Inno Setup 脚本
+tools/              # 辅助工具（RTF 取文本、VBA 模块取过程）
 build.py            # 打包
 tests/              # 回归测试
 ```
