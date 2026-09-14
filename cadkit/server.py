@@ -223,6 +223,48 @@ class BridgeServer:
             e = ms.AddPoint(_pt(*cmd["point"]))
             return {"ok": True, "handle": e.Handle, "object": e.ObjectName}
 
+        # ---------------- 尺寸标注 ----------------
+        # 走 COM 的 AddDim*，而不是 sendcommand 敲 DIMLINEAR ——
+        # 后者会停在命令行等输入，把 AutoCAD 卡成忙态（见使用指南 §8 约束 7）。
+        if c == "add_dim":
+            mode = str(cmd.get("mode", "rotated")).lower()
+            p1, p2 = _pt(*cmd["p1"]), _pt(*cmd["p2"])
+            if mode == "aligned":
+                d = ms.AddDimAligned(p1, p2, _pt(*cmd["loc"]))
+            elif mode == "rotated":
+                d = ms.AddDimRotated(p1, p2, _pt(*cmd["loc"]),
+                                     float(cmd.get("angle", 0.0)))
+            else:
+                return {"ok": False,
+                        "error": "mode 只支持 aligned / rotated，收到 %r" % mode}
+
+            out = {"ok": True, "handle": d.Handle, "object": d.ObjectName}
+            try:
+                out["measurement"] = float(d.Measurement)
+            except Exception:
+                pass
+
+            # 尺寸也是普通图元，颜色/图层照样能改。
+            # 注意尺寸对象和三维实体一样：早绑定包装里未必有 Color，走迟绑定。
+            if cmd.get("color") is not None or cmd.get("layer"):
+                dd = dynamic.Dispatch(d)
+                if cmd.get("color") is not None:
+                    dd.Color = int(cmd["color"])
+                if cmd.get("layer"):
+                    dd.Layer = str(cmd["layer"])
+            if cmd.get("text_height") is not None:
+                try:
+                    d.TextHeight = float(cmd["text_height"])
+                except Exception:
+                    pass
+            return out
+
+        if c == "dimstyle":
+            # 改当前标注样式。颜色走 DIMCLRD，是「尺寸线颜色」的专用系统变量，
+            # 想只把尺寸线染绿而不动文字就用它。
+            doc.SetVariable("DIMCLRD", int(cmd["color"]))
+            return {"ok": True}
+
         # ---------------- 三维实体 ----------------
         if c == "add_region":
             objs = [doc.HandleToObject(str(h)) for h in cmd["handles"]]

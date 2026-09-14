@@ -124,9 +124,18 @@ python -m unittest discover -s tests -v
 
 39 项回归测试，不需要 AutoCAD。
 
-## 示例：三星 Galaxy S23 Ultra
+## 示例
 
-两个脚本，产出的图形都存进 `S23Ultra.dwg`：
+**长方形 + 尺寸标注**（最小示例，适合先跑这个）：
+
+```bash
+python draw_rect_dim.py      # 画 200×120 长方形，下方/右侧各标一个绿色尺寸
+```
+
+尺寸走 `add_dim` 指令（COM 的 `AddDimRotated`），颜色用 AutoCAD 颜色索引
+（1 红 / 2 黄 / **3 绿** / 4 青 / 5 蓝 / 6 洋红 / 7 白）。
+
+**三星 Galaxy S23 Ultra** —— 两个脚本，产出的图形都存进 `S23Ultra.dwg`：
 
 | 脚本 | 产物 |
 |------|------|
