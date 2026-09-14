@@ -352,6 +352,20 @@ class BridgeServer:
                            float(cmd.get("height", 2.5)))
             return _finish(e, cmd)
 
+        if c == "add_mtext":
+            e = ms.AddMText(_pt(*cmd["insert"]), float(cmd.get("width", 0.0)),
+                            str(cmd["text"]))
+            try:
+                e.Height = float(cmd.get("height", 2.5))
+            except Exception:
+                pass
+            out = _finish(e, cmd)
+            try:
+                out["width"] = float(e.Width)
+            except Exception:
+                pass
+            return out
+
         if c == "add_polyline":
             pts = []
             for p in cmd["points"]:

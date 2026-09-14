@@ -193,7 +193,7 @@ SAMPLE_EXISTS = os.path.exists(
 
 
 class TestSectionGeometry(unittest.TestCase):
-    """土层多边形的回归测试。
+    """土层多边形的回归测试（几何函数现在在 cadkit/sections/base.py）。
 
     这两个 bug 都真实发生过，且都只在图上看得见、不报错：
       1. ① 层多边形只有 3 个点 —— 漏了坡顶 (0,0)，
@@ -205,77 +205,80 @@ class TestSectionGeometry(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import draw_section as D
-        D.load_case("CD段")
-        cls.D = D
+        from cadkit import sections
+        from cadkit.sections import base
+        cls.ctx = sections.make_ctx(D.CASES["CD段"])
+        cls.base = base
+
+    # 便捷取用
+    @property
+    def c(self):
+        return self.ctx
 
     def test_first_layer_is_trapezoid_with_slope_top(self):
-        D = self.D
-        pts = D.layer_polygon_pts(D.Y_TOP, -D.P["放坡总高"])
-        self.assertIn((0.0, D.Y_TOP), pts,
+        c, b = self.ctx, self.base
+        pts = b.layer_polygon_pts(c, c.Y_TOP, -c.P["放坡总高"])
+        self.assertIn((0.0, c.Y_TOP), pts,
                       "① 层必须包含坡顶点 (0,0)，否则放坡面会横贯全图")
         self.assertEqual(len(pts), 4, "① 层应是梯形，得到 %d 个点：%s" % (len(pts), pts))
-        self.assertEqual(pts[0][0], D.X_LEFT)
-        self.assertEqual(pts[-1][0], D.X_LEFT)
+        self.assertEqual(pts[0][0], c.X_LEFT)
+        self.assertEqual(pts[-1][0], c.X_LEFT)
 
     def test_layer_below_slope_uses_outer_edge(self):
-        """② 层顶边要延伸到平台外沿(2500)，不能停在坡脚(1500)。"""
-        D = self.D
-        k = -D.P["放坡总高"]
-        pts = D.layer_polygon_pts(k, k - 1000)
-        self.assertEqual(pts[1], (D.X_PLAT_END, k),
+        """② 层顶边要延伸到平台外沿，不能停在坡脚。"""
+        c, b = self.ctx, self.base
+        k = -c.P["放坡总高"]
+        pts = b.layer_polygon_pts(c, k, k - 1000)
+        self.assertEqual(pts[1], (c.X_PLAT_END, k),
                          "② 层顶边该用平台外沿，得到 %s" % (pts[1],))
 
     def test_layer_bottom_at_slope_foot_uses_inner_edge(self):
-        """① 层底边正好落在坡底，只能用坡脚(1500) —— 平台是挖掉的。"""
-        D = self.D
-        k = -D.P["放坡总高"]
-        pts = D.layer_polygon_pts(D.Y_TOP, k)
-        self.assertEqual(pts[-2], (D.X_SLOPE_END, k),
+        """① 层底边正好落在坡底，只能用坡脚 —— 平台是挖掉的。"""
+        c, b = self.ctx, self.base
+        k = -c.P["放坡总高"]
+        pts = b.layer_polygon_pts(c, c.Y_TOP, k)
+        self.assertEqual(pts[-2], (c.X_SLOPE_END, k),
                          "① 层底边该用坡脚，得到 %s" % (pts[-2],))
 
     def test_layer_crossing_pit_bottom_has_step(self):
-        """穿过基底的层：要先沿坑壁下到基底，再横向铺到右边界。"""
-        D = self.D
-        pts = D.layer_polygon_pts(D.Y_BOT + 1000, D.Y_BOT - 5000)
-        self.assertIn((D.X_PLAT_END, D.Y_BOT), pts)
-        self.assertIn((D.X_RIGHT, D.Y_BOT), pts)
+        c, b = self.ctx, self.base
+        pts = b.layer_polygon_pts(c, c.Y_BOT + 1000, c.Y_BOT - 5000)
+        self.assertIn((c.X_PLAT_END, c.Y_BOT), pts)
+        self.assertIn((c.X_RIGHT, c.Y_BOT), pts)
 
     def test_layer_below_pit_is_full_width_rect(self):
-        D = self.D
-        top, bot = D.Y_BOT - 1000, D.Y_BOT - 6000
-        pts = D.layer_polygon_pts(top, bot)
-        self.assertEqual(pts, [(D.X_LEFT, top), (D.X_RIGHT, top),
-                               (D.X_RIGHT, bot), (D.X_LEFT, bot)])
+        c, b = self.ctx, self.base
+        top, bot = c.Y_BOT - 1000, c.Y_BOT - 6000
+        self.assertEqual(b.layer_polygon_pts(c, top, bot),
+                         [(c.X_LEFT, top), (c.X_RIGHT, top),
+                          (c.X_RIGHT, bot), (c.X_LEFT, bot)])
 
     def test_no_duplicate_consecutive_points(self):
         """重复点会让闭合多段线自交、填充失败。"""
-        D = self.D
-        top = D.Y_TOP
-        for _no, _n, depth, _c, _p in D.P["土层"]:
+        c, b = self.ctx, self.base
+        top = c.Y_TOP
+        for _no, _n, depth, _cc, _p in c.P["土层"]:
             bot = -depth * 1000.0
-            pts = D.layer_polygon_pts(top, bot)
-            for a, b in zip(pts, pts[1:]):
-                self.assertNotEqual(a, b, "土层多边形有重复点：%s" % pts)
-            self.assertGreaterEqual(len(pts), 4,
-                                    "多边形至少 4 个点，得到 %s" % pts)
+            pts = b.layer_polygon_pts(c, top, bot)
+            for a, z in zip(pts, pts[1:]):
+                self.assertNotEqual(a, z, "土层多边形有重复点：%s" % pts)
+            self.assertGreaterEqual(len(pts), 4, "多边形至少 4 个点，得到 %s" % pts)
             top = bot
 
     def test_all_layers_close_on_left_edge(self):
-        D = self.D
-        top = D.Y_TOP
-        for _no, _n, depth, _c, _p in D.P["土层"]:
+        c, b = self.ctx, self.base
+        top = c.Y_TOP
+        for _no, _n, depth, _cc, _p in c.P["土层"]:
             bot = -depth * 1000.0
-            pts = D.layer_polygon_pts(top, bot)
-            self.assertEqual(pts[0][0], D.X_LEFT)
-            self.assertEqual(pts[-1][0], D.X_LEFT)
+            pts = b.layer_polygon_pts(c, top, bot)
+            self.assertEqual(pts[0][0], c.X_LEFT)
+            self.assertEqual(pts[-1][0], c.X_LEFT)
             top = bot
 
     def test_layers_are_contiguous(self):
         """相邻两层必须首尾相接，不能有缝也不能重叠。"""
-        D = self.D
-        top = D.Y_TOP
-        prev_bot = None
-        for _no, _n, depth, _c, _p in D.P["土层"]:
+        top, prev_bot = self.ctx.Y_TOP, None
+        for _no, _n, depth, _c, _p in self.ctx.P["土层"]:
             bot = -depth * 1000.0
             if prev_bot is not None:
                 self.assertEqual(prev_bot, top, "土层之间出现了缝或重叠")
@@ -283,11 +286,73 @@ class TestSectionGeometry(unittest.TestCase):
             top = bot
 
     def test_exc_profile_is_three_stage(self):
-        D = self.D
-        self.assertEqual(D.exc_x_at(D.Y_TOP), 0.0)                    # 坡顶
-        self.assertAlmostEqual(D.exc_x_at(D.Y_TOP - 500), 500.0)      # 1:1 放坡
-        self.assertEqual(D.exc_x_at(-D.P["放坡总高"]), D.X_PLAT_END)   # 平台（取外沿）
-        self.assertEqual(D.exc_x_at(D.Y_BOT), D.X_RIGHT)              # 坑底以下
+        c = self.ctx
+        self.assertEqual(c.profile_x(c.Y_TOP), 0.0)                     # 坡顶
+        self.assertAlmostEqual(c.profile_x(c.Y_TOP - 500), 500.0)       # 1:1 放坡
+        self.assertEqual(c.profile_x(-c.P["放坡总高"]), c.X_PLAT_END)    # 平台外沿
+        self.assertEqual(c.profile_x(c.Y_BOT), c.X_RIGHT)               # 坑底以下
+
+
+class TestAllTypes(unittest.TestCase):
+    """三种主体类型都要能建出上下文并算出合法几何 —— 不需要 AutoCAD。
+
+    新增一类绘图程序时最容易犯的错就是几何自相矛盾（多边形自交、
+    标高顺序反了），这里先把它们挡在绘图之前。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import draw_section as D
+        from cadkit import sections
+        cls.D, cls.sections = D, sections
+
+    def _ctx(self, name):
+        return self.sections.make_ctx(self.D.CASES[name])
+
+    def test_all_cases_construct(self):
+        for name in self.D.CASES:
+            c = self._ctx(name)
+            self.assertLess(c.Y_BOT, c.Y_TOP, "%s 的基底该在坡顶之下" % name)
+            self.assertGreater(c.Y_SOIL_BOT, c.Y_PILE_BOT - 1e6)
+
+    def test_all_cases_produce_valid_layer_polygons(self):
+        from cadkit.sections import base as b
+        for name in self.D.CASES:
+            c = self._ctx(name)
+            top = c.Y_TOP
+            for _no, _n, depth, _cc, _p in c.P["土层"]:
+                bot = -depth * 1000.0
+                pts = b.layer_polygon_pts(c, top, bot)
+                self.assertGreaterEqual(len(pts), 4,
+                                        "%s 的土层多边形点太少：%s" % (name, pts))
+                for p, q in zip(pts, pts[1:]):
+                    self.assertNotEqual(p, q, "%s 多边形有重复点" % name)
+                top = bot
+
+    def test_slope_profile_is_multi_step(self):
+        """放坡土钉的轮廓必须跟着台阶走，不能退化成单坡+竖壁。"""
+        c = self._ctx("EF段")
+        breaks = c.profile_breaks()
+        self.assertGreater(len(breaks), 2,
+                           "多级放坡应有多个转折点，得到 %s" % breaks)
+        xs = [c.profile_x(c.Y_TOP - d) for d in (100, 1000, 2500, 4000)]
+        self.assertEqual(xs, sorted(xs), "越往下轮廓的 x 应越大")
+
+    def test_slope_layers_follow_steps(self):
+        from cadkit.sections import base as b
+        c = self._ctx("EF段")
+        top = c.Y_TOP
+        for _no, _n, depth, _cc, _p in c.P["土层"]:
+            bot = -depth * 1000.0
+            pts = b.layer_polygon_pts(c, top, bot)
+            self.assertGreaterEqual(len(pts), 4)
+            top = bot
+
+    def test_double_pile_spacing_positive(self):
+        c = self._ctx("GH段")
+        self.assertGreater(c.P["桩排间距"], 0)
+        self.assertGreater(c.P["桩长"], -c.Y_BOT / 1000.0,
+                           "双排桩的桩长应大于开挖深度（要嵌固）")
 
 
 if __name__ == "__main__":
