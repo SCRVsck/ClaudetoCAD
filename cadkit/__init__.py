@@ -4,5 +4,5 @@
 产品名 CadBridge；本包为全部实现，顶层 bridge.py / cad.py 只是兼容入口。
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 APP_NAME = "CadBridge"

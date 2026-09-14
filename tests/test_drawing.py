@@ -204,10 +204,9 @@ class TestSectionGeometry(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import draw_section as D
-        from cadkit import sections
+        from cadkit import draw, sections
         from cadkit.sections import base
-        cls.ctx = sections.make_ctx(D.CASES["CD段"])
+        cls.ctx = sections.make_ctx(draw.CASES["CD段"])
         cls.base = base
 
     # 便捷取用
@@ -302,22 +301,21 @@ class TestAllTypes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import draw_section as D
-        from cadkit import sections
-        cls.D, cls.sections = D, sections
+        from cadkit import draw, sections
+        cls.draw, cls.sections = draw, sections
 
     def _ctx(self, name):
-        return self.sections.make_ctx(self.D.CASES[name])
+        return self.sections.make_ctx(self.draw.CASES[name])
 
     def test_all_cases_construct(self):
-        for name in self.D.CASES:
+        for name in self.draw.CASES:
             c = self._ctx(name)
             self.assertLess(c.Y_BOT, c.Y_TOP, "%s 的基底该在坡顶之下" % name)
             self.assertGreater(c.Y_SOIL_BOT, c.Y_PILE_BOT - 1e6)
 
     def test_all_cases_produce_valid_layer_polygons(self):
         from cadkit.sections import base as b
-        for name in self.D.CASES:
+        for name in self.draw.CASES:
             c = self._ctx(name)
             top = c.Y_TOP
             for _no, _n, depth, _cc, _p in c.P["土层"]:
@@ -353,6 +351,50 @@ class TestAllTypes(unittest.TestCase):
         self.assertGreater(c.P["桩排间距"], 0)
         self.assertGreater(c.P["桩长"], -c.Y_BOT / 1000.0,
                            "双排桩的桩长应大于开挖深度（要嵌固）")
+
+
+class TestTemplateLookup(unittest.TestCase):
+    """找不到模板时要给出**可照做**的提示。
+
+    这里守的是一个真实 bug：find_template 里留了一行多余的
+    `from . import cad`（cadkit 里根本没有这个模块），于是「找不到模板」
+    这条分支直接抛 ImportError，用户看到的是
+    `cannot import name 'cad' from 'cadkit'` —— 完全不知所云。
+    """
+
+    def test_missing_template_raises_template_error(self):
+        from unittest import mock
+
+        from cadkit import draw
+        with mock.patch.object(draw.paths, "install_dir",
+                               return_value=r"C:\no_such_dir_xyz"), \
+             mock.patch.object(draw.config, "load",
+                               return_value={"template_dwg": ""}):
+            with self.assertRaises(draw.TemplateError) as cm:
+                draw.find_template()
+        msg = str(cm.exception)
+        self.assertIn("template_dwg", msg, "提示里要写清怎么配置")
+        self.assertIn("--template-dwg", msg, "提示里要给命令行用法")
+
+    def test_explicit_template_wins(self):
+        import tempfile
+        from cadkit import draw
+        fd, p = tempfile.mkstemp(suffix=".dwg")
+        os.close(fd)
+        try:
+            self.assertEqual(draw.find_template(p), os.path.abspath(p))
+        finally:
+            os.remove(p)
+
+    def test_builtin_cases_are_drawable(self):
+        """每个内置工点的类型都要有对应的绘图程序，不能是空壳。"""
+        from cadkit import draw, sections
+        main_t, _addon = sections.supported()
+        for name, case in draw.CASES.items():
+            self.assertIn(case["类型"], main_t,
+                          "%s 的类型 %s 没有绘图程序" % (name, case["类型"]))
+            for k in ("名称", "图名", "土层", "坡顶标高", "基底标高", "正负零标高"):
+                self.assertIn(k, case, "%s 少了必需参数 %s" % (name, k))
 
 
 if __name__ == "__main__":

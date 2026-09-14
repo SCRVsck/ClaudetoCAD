@@ -138,6 +138,21 @@ def _check_roundtrip(rep, deep):
         rep.add(FAIL, "端到端写入测试失败", str(e))
 
 
+def _check_template(rep):
+    """绘图模板检查。
+
+    「按标准出图」依赖一份带标准图框块的模板 DWG —— 标准（图框块、图层、
+    文字样式）都在它里面，从零画一个图框永远只是「像」。打包后模板不在
+    安装包里，用户得指定一次，所以自检要能告诉他缺的是什么。
+    """
+    from . import draw
+    try:
+        p = draw.find_template()
+        rep.add(OK, "绘图模板可用", p)
+    except draw.TemplateError as e:
+        rep.add(WARN, "没有绘图模板（绘图功能会不可用）", str(e))
+
+
 def _check_cjk(rep, deep):
     """中文字体是否可用。"""
     if not deep:
@@ -171,6 +186,7 @@ def run(deep=False, verbose=False):
 
     _check_running(rep)
     _check_bridge(rep)
+    _check_template(rep)
 
     if not deep:
         rep.add(WARN, "深度检查未运行", "加 --deep 会真画一条线来端到端验证。")

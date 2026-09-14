@@ -44,6 +44,7 @@ cadbridge info
 | 命令 | 说明 |
 |------|------|
 | `cadbridge doctor [--deep]` | 自检：哪一环断了、怎么修。`--deep` 会真画一条线做端到端验证 |
+| `cadbridge draw [工点]` | **按工程图标准出图**（`--rtf` 读计算书 / `--dir` 批量 / `--list` 列举） |
 | `cadbridge gui` | 打开图形控制台 |
 | `cadbridge info` / `status` | 桥接与 AutoCAD 的状态 |
 | `cadbridge line 0,0 100,100` | 直线 |
@@ -126,20 +127,20 @@ python -m unittest discover -s tests -v
 
 ## 示例
 
-**自动绘图**（读计算书 → 出施工图）：
+**自动绘图**（读计算书 → 出施工图）。打包后也能用 —— 绘图能力做进了 CLI：
 
 ```bash
-# 一份计算书出一张图
-python draw_section.py --rtf eg/桩悬臂.rtf
-
-# 一个目录的计算书批量出一册（按演示图的方式并排排开）
-python draw_section.py --dir 计算书目录/
-
-# 用内置参数（不读计算书）
-python draw_section.py CD段 --template     # 桩锚/悬臂桩
-python draw_section.py EF段 --template     # 放坡土钉
-python draw_section.py GH段 --template     # 双排桩
+cadbridge config template_dwg D:\标准模板\演示.dwg   # 指定一次标准模板
+cadbridge draw EF段                                 # 之后直接出图（放坡土钉）
+cadbridge draw --rtf 计算书.rtf                     # 一份计算书 → 一张图
+cadbridge draw --dir 计算书目录/                     # 一批 → 一册（并排排开）
+cadbridge draw --list                               # 看有哪些类型
 ```
+
+> **标准模板是必需的**：标准（图框块 `CSSDI-A3`、23 个图层、文字样式）
+> 都在那份图纸里，从零画一个图框永远只是「像」。`cadbridge doctor` 会检查它。
+
+源码运行等价于 `python draw_section.py ...` —— 同一份实现，见 `cadkit/draw.py`。
 
 参数从**天汉基坑设计软件**导出的计算书里解析：土层（编号/名称/层底埋深/C/φ）、
 桩排（桩顶标高/桩长/间距/直径）、冠梁、放坡、地面超载、支护结构类型。
@@ -161,10 +162,12 @@ python draw_section.py GH段 --template     # 双排桩
 主体决定开挖轮廓、出一张独立图纸；附加叠加在主体剖面上。
 参数里用 `附加: ["passive", "notes"]` 指定要叠哪些 —— 任一主体都能配任一组附加。
 
-**基坑支护剖面图**（按工程图标准生成）：
+**基坑支护剖面图**（用内置参数，不读计算书）：
 
 ```bash
-python draw_section.py       # CD段悬臂桩：土层填充 + 冠梁 + 支护桩 + 尺寸 + 图签
+python draw_section.py         # CD段悬臂桩
+python draw_section.py EF段    # 放坡土钉
+python draw_section.py GH段    # 双排桩
 ```
 
 **长方形 + 尺寸标注**（最小示例，适合先跑这个）：

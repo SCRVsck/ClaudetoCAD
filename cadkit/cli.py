@@ -107,6 +107,28 @@ def cmd_gui(args):
     return gui.run()
 
 
+def cmd_draw(args):
+    """按工程图标准出图。
+
+    以前这一步只能跑根目录的 `draw_section.py` —— 那是个独立脚本，
+    打包进 exe 的只有 cadkit，所以装了软件的人**根本调不到绘图功能**。
+    现在实现搬进了 cadkit.draw，CLI 和脚本共用同一份。
+    """
+    from . import draw
+    if args.list:
+        return draw.run(draw.CASES, list_only=True)
+    case = None
+    if not (args.rtf or args.dir):
+        name = args.case or "CD段"
+        if name not in draw.CASES:
+            _err("未知工点 %r，可选：%s\n（用 `cadbridge draw --list` 看全部类型）"
+                 % (name, "、".join(draw.CASES)))
+            return 2
+        case = draw.CASES[name]
+    return draw.run(case, rtf=args.rtf, folder=args.dir,
+                    template=args.template_dwg, outdir=args.out)
+
+
 def cmd_doctor(args):
     rep = doctor.run(deep=args.deep)
     print("CadBridge 自检 · v%s" % __version__)
@@ -276,6 +298,17 @@ def build_parser():
 
     sp = sub.add_parser("gui", help="打开图形控制台")
     sp.set_defaults(func=cmd_gui)
+
+    sp = sub.add_parser("draw", help="按工程图标准出图（基坑支护剖面）")
+    sp.add_argument("case", nargs="?",
+                    help="内置工点，如 CD段(悬臂桩) / EF段(放坡土钉) / GH段(双排桩)")
+    sp.add_argument("--rtf", help="计算书 RTF：解析参数并出图")
+    sp.add_argument("--dir", help="批量：一个目录里的所有 .rtf 出一册图")
+    sp.add_argument("--template-dwg", dest="template_dwg",
+                    help="标准模板 DWG（承载图框块/图层/文字样式）")
+    sp.add_argument("--out", help="出图的落盘目录")
+    sp.add_argument("--list", action="store_true", help="列出可用的类型与工点")
+    sp.set_defaults(func=cmd_draw)
 
     sp = sub.add_parser("info", help="桥接与 AutoCAD 状态")
     sp.set_defaults(func=cmd_info)
