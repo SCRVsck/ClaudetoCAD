@@ -80,10 +80,15 @@ python build.py --all        # 三样都出
 看到多余的黑窗口，要么 CLI 用户白背几 MB 的 tkinter。分开最干净。
 
 打包后目标机器**不需要装 Python**，只需要装 AutoCAD。安装程序按用户安装
-（`PrivilegesRequired=lowest`），不弹 UAC。
+（`PrivilegesRequired=lowest`），不弹 UAC；卸载会精确还原用户 PATH。
 
-> 编译安装程序需要 [Inno Setup 6](https://jrsoftware.org/isdl.php)；
-> 缺了不会导致构建失败，只会跳过并提示。
+> 编译安装程序需要 [Inno Setup 6](https://jrsoftware.org/isdl.php)
+> （`winget install JRSoftware.InnoSetup`）；缺了不会导致构建失败，只会跳过并提示。
+> 想要中文向导界面需另加 `ChineseSimplified.isl`（Inno Setup 不自带），
+> 没有就是英文界面，功能不受影响。
+
+安装程序已实测走通「静默安装 → 校验 → 静默卸载」全流程：文件、开始菜单、
+用户 PATH、注册表卸载项均正确写入并在卸载后清理干净。
 
 | 项 | 值 |
 |----|----|

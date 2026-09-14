@@ -25,13 +25,37 @@ ISS = os.path.join(BASE, "installer", "cadbridge.iss")
 
 DOCS = ["README.md", "使用指南.md", "LICENSE"]
 
-# Inno Setup 可能会装在这两个位置
+# Inno Setup 的安装位置有好几种，逐个找。
+# 注意 winget 默认装的是**按用户**版本，落在 %LOCALAPPDATA%\Programs 下 ——
+# 只查 Program Files 会漏掉，实测就漏过一次。
 ISCC_CANDIDATES = [
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Inno Setup 6", "ISCC.exe"),
     os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
                  "Inno Setup 6", "ISCC.exe"),
     os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
                  "Inno Setup 6", "ISCC.exe"),
 ]
+
+
+def _iscc_from_registry():
+    """从卸载信息里读 Inno Setup 的安装目录 —— 比猜路径可靠。"""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    roots = [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]
+    sub = (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+           r"\Inno Setup 6_is1")
+    for root in roots:
+        try:
+            with winreg.OpenKey(root, sub) as k:
+                loc = winreg.QueryValueEx(k, "InstallLocation")[0]
+        except OSError:
+            continue
+        p = os.path.join(loc, "ISCC.exe")
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def version():
@@ -185,6 +209,9 @@ def build_portable():
 
 # -------------------------------------------------------------- 安装程序
 def find_iscc():
+    p = _iscc_from_registry()
+    if p:
+        return p
     for p in ISCC_CANDIDATES:
         if os.path.exists(p):
             return p

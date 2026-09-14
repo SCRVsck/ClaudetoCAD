@@ -22,6 +22,12 @@
 #define MyAppGuiExeName "cadbridge-gui.exe"
 #define MyAppURL "https://github.com/SCRVsck/ClaudetoCAD"
 
+; 简体中文界面**不是 Inno Setup 自带的**（需另下 ChineseSimplified.isl）。
+; 两个位置任意一个都算数：Inno Setup 的 Languages 目录，或本项目 installer/languages/。
+; 找不到就只装英文界面 —— 功能不受影响，只是向导界面是英文的。
+#define ChineseInCompiler FileExists(AddBackslash(CompilerPath) + "Languages\ChineseSimplified.isl")
+#define ChineseInProject FileExists(AddBackslash(SourcePath) + "languages\ChineseSimplified.isl")
+
 [Setup]
 AppId={{8F3A2C41-7B6E-4D9A-9E21-5C4B8A0F1D33}
 AppName={#MyAppName}
@@ -49,13 +55,21 @@ CloseApplications=yes
 RestartApplications=no
 
 [Languages]
+#if ChineseInCompiler
 Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+#elif ChineseInProject
+Name: "chinese"; MessagesFile: "languages\ChineseSimplified.isl"
+#endif
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
+; 中文条目必须和 [Languages] 里的 chinese 同进同退，
+; 否则 Inno 会报「Unknown language name "chinese"」。
+#if ChineseInCompiler || ChineseInProject
 chinese.NoAutoCAD=安装程序没有在本机检测到 AutoCAD。%n%nCadBridge 本身能装好，但在装上 AutoCAD 之前无法工作。%n%n需要继续吗？
 chinese.AutoCADFound=检测到本机已安装 AutoCAD，版本：
 chinese.PathNote=已把 CadBridge 加入用户 PATH，重新打开命令行后即可直接使用 cadbridge 命令。
+#endif
 english.NoAutoCAD=AutoCAD was not detected on this machine.%n%nCadBridge will install fine, but cannot work until AutoCAD is installed.%n%nContinue anyway?
 english.AutoCADFound=AutoCAD detected on this machine, version:
 english.PathNote=CadBridge was added to your user PATH. Open a new terminal to use the cadbridge command.
@@ -153,7 +167,14 @@ begin
   Result := True;
   Found := DetectAutoCAD();
   if Found = '' then
+  begin
+    // 静默安装时绝不能弹框 —— 没人点，安装程序会一直挂着。
+    // 注意 /SUPPRESSMSGBOXES **不会**抑制 [Code] 里自己调的 MsgBox，
+    // 必须显式判断 WizardSilent（实测就因为这个卡死过一次）。
+    if WizardSilent then
+      exit;
     Result := MsgBox(ExpandConstant('{cm:NoAutoCAD}'), mbConfirmation, MB_YESNO) = IDYES;
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -162,6 +183,8 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    if WizardSilent then
+      exit;
     Found := DetectAutoCAD();
     if Found <> '' then
       MsgBox(ExpandConstant('{cm:AutoCADFound}') + ' ' + Found, mbInformation, MB_OK);
