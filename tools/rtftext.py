@@ -5,7 +5,8 @@ import sys
 
 
 def rtf_text(path):
-    raw = open(path, "rb").read()
+    with open(path, "rb") as f:
+        raw = f.read()
 
     # 丢弃图片等二进制组 {\pict ...}
     raw = re.sub(rb"\{\\\*?\\pict.*?\}", b"", raw, flags=re.S)

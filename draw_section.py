@@ -14,6 +14,7 @@
     剖面本身以坡顶为原点，再整体平移到图纸幅面内。
 """
 
+import glob
 import math
 import os
 import sys
@@ -22,7 +23,7 @@ import time
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 import cad  # noqa: E402
-from cadkit import standard  # noqa: E402
+from cadkit import calcbook, standard  # noqa: E402
 
 # ============================================================ 参数（工点）
 # 每个工点就是一组参数；「不同于演示」只要换一组即可。
@@ -104,6 +105,21 @@ CASES = {
 FRAME_INSERT = [-1000.0, -11000.0]
 FRAME_BOX = (-19750.0, -25850.0, 22250.0, 3850.0)     # x0,y0,x1,y1
 SIGN_COL_X = 14944.0        # 图签栏左边界（图框内右侧那一栏）
+# 相邻两张图的水平间距 —— 实测演示图里 11 个图框排在 -1000, 51000, 103000…
+SHEET_PITCH = 52000.0
+SHEET_DX = 0.0              # 当前这张图的水平偏移（批量出图时逐张累加）
+
+# 图签栏各格子的落字位置，**直接量自演示图**（图框在 (-1000,-11000) 时）。
+# 图框块没有属性，格子是空的，填值只能按坐标放文字。
+TITLE_CELLS = {
+    "项目名称": ((17240.0, -19850.0), 600.0),
+    "图名":     ((17030.0, -21650.0), 600.0),
+    "专业":     ((20658.0, -22750.0), 400.0),
+    "图号":     ((20325.0, -23550.0), 300.0),
+    "设计阶段": ((17268.0, -24300.0), 400.0),
+    "版本号":   ((20578.0, -24350.0), 400.0),
+    "出图日期": ((17075.0, -25100.0), 300.0),
+}
 
 # 文字：标准图里 566 个文字**全部**用 PM-TEXT，字高以 400 为主。
 # 但它的原字体是 Tssdeng.shx（探索者 TSSD 字体，路径指向 AutoCAD 2012），
@@ -126,10 +142,14 @@ FAILED = []
 
 
 # ------------------------------------------------------------ 当前工点
-def load_case(name):
-    """把一组参数摊成本模块的全局量 —— 绘图函数都直接读这些名字。"""
-    global P
-    P = CASES[name]
+def use_params(p):
+    """把一组参数摊成本模块的全局量 —— 绘图函数都直接读这些名字。
+
+    参数可以来自 CASES（手写），也可以来自 cadkit.calcbook（解析计算书），
+    两者结构一致，所以下游完全不用区分。
+    """
+    global P, SHEET_DX
+    P = p
     g = globals()
     g["Y_TOP"] = 0.0
     g["Y_PILE_TOP"] = Y(P["桩顶标高"])
@@ -145,14 +165,125 @@ def load_case(name):
     g["X_BEAM_HALF"] = (P["桩径"] + 2 * P["冠梁外扩"]) / 2.0
 
 
+def load_case(name):
+    use_params(CASES[name])
+
+
+# 目前只有桩锚/悬臂这一种类型的绘图程序，其余的要按需补
+SUPPORTED_TYPES = {"pile": "桩锚/悬臂桩"}
+
+
+def draw_one(p, warn=()):
+    """画一张完整的图。返回 True 表示成功。"""
+    stype = p.get("类型", "pile")
+    if stype not in SUPPORTED_TYPES:
+        print("  跳过：支护类型 %r（%s）还没有绘图程序"
+              % (p.get("支护类型", stype), stype))
+        print("        目前已实现：%s" % "、".join(SUPPORTED_TYPES.values()))
+        return False
+
+    print("=== %s ===" % (p.get("图名") or p.get("名称")))
+    for w in warn:
+        print("   警告：%s" % w)
+    use_params(p)
+
+    setup_sheet()
+    draw_soils()
+    draw_structure()
+    draw_load()
+    draw_dims()
+    draw_notes_and_title()
+    fill_titleblock()
+    return True
+
+
+def _opt(args, key):
+    if key in args:
+        i = args.index(key)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
+def main():
+    args = sys.argv[1:]
+    rtf = _opt(args, "--rtf")
+    folder = _opt(args, "--dir")
+    named = [a for a in args if not a.startswith("-")
+             and a not in (rtf, folder)]
+
+    # ---- 准备图纸 ----
+    name = named[0] if named else "CD段"
+    if not (rtf or folder) and name not in CASES:
+        print("未知工点 %r，可选：%s" % (name, "、".join(CASES)))
+        return 2
+    if rtf or folder:
+        load_case("CD段")          # 先用一套占位参数，仅为了拿到图名去命名文件
+        label = ("批量出图" if folder else os.path.splitext(
+            os.path.basename(rtf))[0])
+        prepare_from_template_named(label)
+    else:
+        load_case(name)
+        if "--template" in args or "--new" in args:
+            prepare_from_template(name)
+
+    # ---- 出图 ----
+    ok = True
+    if folder:
+        files = sorted(glob.glob(os.path.join(folder, "*.rtf")))
+        if not files:
+            print("目录里没有 .rtf：%s" % folder)
+            return 2
+        print("批量出图：%d 份计算书\n" % len(files))
+        for i, f in enumerate(files):
+            globals()["SHEET_DX"] = i * SHEET_PITCH
+            try:
+                p, warn = calcbook.parse(f)
+            except Exception as e:
+                print("[%d] %s 解析失败：%s" % (i + 1, os.path.basename(f), e))
+                ok = False
+                continue
+            p["图号"] = p.get("图号") or "JS-%02d-1" % (i + 1)
+            ok = draw_one(p, warn) and ok
+            print()
+    elif rtf:
+        try:
+            p, warn = calcbook.parse(rtf)
+        except Exception as e:
+            print("解析失败：%s" % e)
+            return 1
+        globals()["SHEET_DX"] = 0.0
+        ok = draw_one(p, warn)
+    else:
+        globals()["SHEET_DX"] = 0.0
+        ok = draw_one(CASES[name])
+
+    # 缩放到所有图框
+    n = max(1, len(glob.glob(os.path.join(folder, "*.rtf"))) if folder else 1)
+    x0, y0, x1, y1 = FRAME_BOX
+    call({"cmd": "zoom", "mode": "center",
+          "center": [x0 + (x1 - x0) / 2 + (n - 1) * SHEET_PITCH / 2,
+                     (y0 + y1) / 2, 0.0],
+          "height": (y1 - y0) * 1.1 if n == 1 else (x1 - x0 + (n - 1) * SHEET_PITCH) * 0.6})
+
+    print("\n完成。实体总数 %s；失败项：%s"
+          % (cad.send({"cmd": "count"}).get("count"), FAILED if FAILED else "无"))
+    return 0 if ok else 1
+
+
 def Y(elev_m):
     """标高(m) -> 图面 y（mm，坡顶为 0，向下为负）。"""
     return (elev_m - P["坡顶标高"]) * 1000.0
 
 
 def YX(x, y):
-    """剖面坐标 -> 图纸坐标。"""
-    return x + OX, y + OY
+    """剖面坐标 -> 图纸坐标（含当前张的水平偏移）。"""
+    return x + OX + SHEET_DX, y + OY
+
+
+def FX(x):
+    """图纸绝对坐标 -> 当前张（图框/图签/说明用的是绝对坐标）。"""
+    return x + SHEET_DX
 
 
 # ------------------------------------------------------------------ 桥接
@@ -234,7 +365,7 @@ def setup_sheet():
     ensure_layers()
 
     r = call({"cmd": "insert", "name": "CSSDI-A3", "layer": "图框",
-              "point": [FRAME_INSERT[0], FRAME_INSERT[1], 0.0],
+              "point": [FRAME_INSERT[0] + SHEET_DX, FRAME_INSERT[1], 0.0],
               "xscale": 1.0, "yscale": 1.0, "zscale": 1.0})
     print("    图框句柄 %s" % r.get("handle"))
 
@@ -415,7 +546,7 @@ def draw_notes_and_title():
     自己画一套就又不是标准了。
     """
     print("[6] 图名 / 设计说明")
-    x0 = FRAME_BOX[0] + 2500
+    x0 = FX(FRAME_BOX[0] + 2500)
     y_base = Y_SOIL_BOT + OY
 
     text(P["图名"], (x0, y_base - 1400), h=TITLE_H, layer="图名", xform=False)
@@ -443,7 +574,32 @@ def draw_notes_and_title():
              layer="设计说明", xform=False)
 
 
-def prepare_from_template(case_name):
+def fill_titleblock():
+    """把工程信息填进图签栏各格。
+
+    图框块没有属性（格子里是空的），值只能在模型空间按坐标放文字 ——
+    位置是**从演示图里量出来的**，照着原图的落字点走，版式才一致。
+    """
+    vals = {
+        "项目名称": "%s基坑支护工程" % P.get("名称", ""),
+        "图名": P.get("图名") or "%s支护结构剖面图" % P.get("名称", ""),
+        "专业": "基坑",
+        "图号": P.get("图号") or "",
+        "设计阶段": P.get("设计阶段", "施工图"),
+        "版本号": P.get("版本号", "V1.0"),
+        "出图日期": P.get("日期") or "",
+    }
+    filled = []
+    for key, (at, h) in TITLE_CELLS.items():
+        v = vals.get(key)
+        if not v:
+            continue
+        text(v, (FX(at[0]), at[1]), h=h, layer="图框", xform=False)
+        filled.append(key)
+    print("[7] 图签栏填格：%s" % "、".join(filled))
+
+
+def prepare_from_template_named(label):
     """从演示图复制一份干净模板并打开。
 
     演示图里带着这套标准的**图框块、23 个图层、5 个文字样式、2 个标注样式** ——
@@ -454,7 +610,7 @@ def prepare_from_template(case_name):
     src = os.path.join(BASE, "eg", "演示.dwg")
     outdir = os.path.join(BASE, "out")
     os.makedirs(outdir, exist_ok=True)
-    dst = os.path.join(outdir, "%s.dwg" % CASES[case_name]["图名"])
+    dst = os.path.join(outdir, "%s.dwg" % label)
     if not os.path.exists(src):
         print("找不到模板 %s —— 请把演示图放在 eg/ 下" % src)
         return None
@@ -463,39 +619,9 @@ def prepare_from_template(case_name):
     shutil.copy2(src, dst)
     r = call({"cmd": "open", "path": dst})
     e = call({"cmd": "erase_all"})
-    print("[0] 模板 %s：打开 %s 图元 → 清空后 %s"
+    print("[0] 模板 %s：打开 %s 图元 → 清空后 %s\n"
           % (os.path.basename(src), r.get("entities"), e.get("after")))
     return dst
-
-
-def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    name = args[0] if args else "CD段"
-    if name not in CASES:
-        print("未知工点 %r，可选：%s" % (name, "、".join(CASES)))
-        return 2
-    load_case(name)
-
-    print("=== 生成 %s ===" % P["图名"])
-    if "--template" in sys.argv or "--new" in sys.argv:
-        prepare_from_template(name)
-
-    setup_sheet()
-    draw_soils()
-    draw_structure()
-    draw_load()
-    draw_dims()
-    draw_notes_and_title()
-
-    # 缩放到图框
-    x0, y0, x1, y1 = FRAME_BOX
-    call({"cmd": "zoom", "mode": "center",
-          "center": [(x0 + x1) / 2, (y0 + y1) / 2, 0.0],
-          "height": (y1 - y0) * 1.12})
-
-    print("\n完成。实体总数 %s；失败项：%s"
-          % (cad.send({"cmd": "count"}).get("count"), FAILED if FAILED else "无"))
-    return 0
 
 
 if __name__ == "__main__":

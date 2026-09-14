@@ -491,6 +491,28 @@ class BridgeServer:
             doc.ActiveTextStyle = ts
             return {"ok": True, "name": str(ts.Name)}
 
+        if c == "blocktexts":
+            """只取块定义里的文字（含位置/字高）。
+
+            图框块有一万多个图元，全量拉回来太重；而填图签栏只需要知道
+            各标签（项目名称、图名、设计号…）在哪一行。
+            """
+            B = doc.Blocks.Item(str(cmd["name"]))
+            out = []
+            for i in range(int(B.Count)):
+                try:
+                    e = dynamic.Dispatch(B.Item(i))
+                    nm = str(e.ObjectName)
+                    if not (nm.endswith("Text") or nm.endswith("MText")):
+                        continue
+                    out.append({"text": str(e.TextString),
+                                "at": list(e.InsertionPoint),
+                                "h": float(getattr(e, "Height", 0) or 0)})
+                except Exception:
+                    continue
+            return {"ok": True, "name": str(B.Name), "count": len(out),
+                    "texts": out}
+
         if c == "blockbbox":
             """算块定义里所有图元的坐标范围。
 
