@@ -1,0 +1,16 @@
+# 运行时产物
+state.json
+bridge.log
+events.jsonl
+
+# AutoCAD 锁文件 / 备份
+*.dwl
+*.dwl2
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+
+# 临时截图
+*.png
