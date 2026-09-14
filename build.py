@@ -20,6 +20,7 @@ DIST = os.path.join(BASE, "dist")
 BUILD = os.path.join(BASE, "build")
 ICON = os.path.join(BASE, "assets", "cadbridge.ico")
 EXE = os.path.join(DIST, "cadbridge.exe")
+EXE_GUI = os.path.join(DIST, "cadbridge-gui.exe")
 ISS = os.path.join(BASE, "installer", "cadbridge.iss")
 
 DOCS = ["README.md", "使用指南.md", "LICENSE"]
@@ -85,11 +86,14 @@ def build_exe():
     if r != 0:
         print("打包失败（退出码 %d）" % r)
         return r
-    if not os.path.exists(EXE):
-        print("打包流程结束，但没找到 %s" % EXE)
+
+    missing = [p for p in (EXE, EXE_GUI) if not os.path.exists(p)]
+    if missing:
+        print("打包流程结束，但缺少产物：%s" % ", ".join(missing))
         return 1
 
-    print("\n打包完成：%s（%.1f MB）" % (EXE, os.path.getsize(EXE) / 1024.0 / 1024.0))
+    for p in (EXE, EXE_GUI):
+        print("打包完成：%s（%.1f MB）" % (p, os.path.getsize(p) / 1024.0 / 1024.0))
     return 0
 
 
@@ -149,6 +153,7 @@ def build_portable():
     os.makedirs(stage, exist_ok=True)
 
     shutil.copy2(EXE, os.path.join(stage, "cadbridge.exe"))
+    shutil.copy2(EXE_GUI, os.path.join(stage, "cadbridge-gui.exe"))
     for name in DOCS:
         src = os.path.join(BASE, name)
         if os.path.exists(src):

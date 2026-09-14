@@ -97,6 +97,16 @@ def cmd_serve(args):
     return server.BridgeServer().serve_forever()
 
 
+def cmd_gui(args):
+    try:
+        from . import gui
+    except ImportError as e:
+        _err("图形界面不可用：%s\n（打包版请用 cadbridge-gui.exe；"
+             "源码运行需要 Python 带 tkinter）" % e)
+        return 1
+    return gui.run()
+
+
 def cmd_doctor(args):
     rep = doctor.run(deep=args.deep)
     print("CadBridge 自检 · v%s" % __version__)
@@ -263,6 +273,9 @@ def build_parser():
     sp = sub.add_parser("doctor", help="自检：我现在缺什么？")
     sp.add_argument("--deep", action="store_true", help="真画一条线做端到端验证")
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("gui", help="打开图形控制台")
+    sp.set_defaults(func=cmd_gui)
 
     sp = sub.add_parser("info", help="桥接与 AutoCAD 状态")
     sp.set_defaults(func=cmd_info)

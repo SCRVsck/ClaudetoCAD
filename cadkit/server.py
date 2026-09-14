@@ -14,6 +14,7 @@
 import hashlib
 import json
 import os
+import select
 import socket
 import sys
 import time
@@ -439,9 +440,8 @@ class BridgeServer:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("127.0.0.1", 0))          # 只监听回环
-        server.listen(8)
+        server.listen(32)
         self.port = server.getsockname()[1]
-        server.settimeout(0.2)
 
         # 每次启动换一把新 token，和 state.json 一起放在用户私有目录里
         self.token = protocol.new_token()
@@ -460,22 +460,75 @@ class BridgeServer:
                  % (self.port, self.info.get("version"), self.info.get("mode")))
         print("BRIDGE_READY port=%d" % self.port, flush=True)
 
+        # 多路复用而不是「一条连接处理到底」。
+        # 客户端会复用长连接（为了不耗尽临时端口），而长连接大部分时间是空闲的；
+        # 单线程 accept 循环会在那条空闲连接上阻塞住，别的客户端根本进不来 ——
+        # 现场表现是：桥接明明在监听，status 却报「桥接未运行」（新连接的 SYN
+        # 堆在 backlog 里，堆满就被内核丢掉）。
+        #
+        # 这里刻意**不用「每连接一个线程」**：AutoCAD 的 COM 对象是在主线程
+        # 创建的，跨线程调用需要 marshaling，风险比收益大。select 循环让所有
+        # COM 调用仍然只发生在主线程。
+        conns = {}          # socket -> {"buf": bytearray, "last": float}
+        idle = float(self.cfg.get("conn_idle_timeout", 300))
+        stopping = False
+
         try:
-            while True:
-                if ENABLE_EVENTS:
-                    try:
-                        pythoncom.PumpWaitingMessages()
-                    except Exception:
-                        pass
+            while not stopping:
+                socks = [server] + list(conns)
                 try:
-                    conn, _addr = server.accept()
-                except socket.timeout:
+                    ready, _, _ = select.select(socks, [], [], 0.5)
+                except (OSError, ValueError):
                     continue
-                except OSError:
-                    break
-                if not self._serve_one(conn):
-                    break
+
+                for s in ready:
+                    if s is server:
+                        try:
+                            conn, _addr = server.accept()
+                        except OSError:
+                            continue
+                        conns[conn] = {"buf": bytearray(), "last": time.time()}
+                        continue
+
+                    state = conns.get(s)
+                    if state is None:
+                        continue
+
+                    try:
+                        chunk = s.recv(65536)
+                    except OSError:
+                        self._drop(conns, s)
+                        continue
+                    if not chunk:
+                        self._drop(conns, s)      # 客户端正常关闭
+                        continue
+
+                    state["last"] = time.time()
+                    state["buf"] += chunk
+                    if len(state["buf"]) > protocol.MAX_FRAME:
+                        self._drop(conns, s)
+                        continue
+
+                    # 一条连接上可能一次到达多条指令，逐行处理
+                    def _send(resp, _s=s):
+                        _s.sendall((json.dumps(resp, ensure_ascii=False) + "\n")
+                                   .encode("utf-8"))
+
+                    try:
+                        if self._process_buffer(state["buf"], _send):
+                            stopping = True
+                            break
+                    except OSError:
+                        self._drop(conns, s)
+                        continue
+
+                # 清掉空闲太久的连接，别让死掉的客户端一直占着
+                now = time.time()
+                for s in [c for c, st in conns.items() if now - st["last"] > idle]:
+                    self._drop(conns, s)
         finally:
+            for s in list(conns):
+                self._drop(conns, s)
             try:
                 server.close()
             except Exception:
@@ -485,68 +538,53 @@ class BridgeServer:
             lock.release()
         return 0
 
-    def _serve_one(self, conn):
-        """一条连接上处理多个请求，直到客户端关闭。返回 False 表示该退出桥接。
-
-        客户端（protocol.send）会复用长连接 —— 建模脚本动辄发上百条指令，
-        每条都新建连接会把本机临时端口耗光（TIME_WAIT 堆积到 10048）。
-        所以这里按行循环读，而不是「一条连接一条指令」。
-        """
+    def _drop(self, conns, sock):
+        conns.pop(sock, None)
         try:
-            conn.settimeout(float(self.cfg.get("conn_idle_timeout", 300)))
-            buf = b""
-            while True:
-                try:
-                    while b"\n" not in buf:
-                        chunk = conn.recv(65536)
-                        if not chunk:
-                            return True        # 客户端正常关闭
-                        buf += chunk
-                        if len(buf) > protocol.MAX_FRAME:
-                            return True
-                except socket.timeout:
-                    return True                # 空闲超时，放掉这条连接
-                except OSError:
-                    return True
+            sock.close()
+        except Exception:
+            pass
 
-                line, buf = buf.split(b"\n", 1)
-                if not line.strip():
-                    continue                   # 空行 / 探活连接，不触发任何处理
+    def _process_buffer(self, buf, send):
+        """处理缓冲区里所有完整行。返回 True 表示桥接应当退出。
 
-                try:
-                    req = json.loads(line.decode("utf-8", "replace"))
-                except ValueError as e:
-                    resp = {"ok": False, "error": "请求不是合法 JSON：%s" % e}
-                else:
-                    if self._authorized(req):
-                        resp = self._dispatch_with_retry(req)
-                    else:
-                        self.log("拒绝了一个未通过鉴权的请求（cmd=%r）" % req.get("cmd"))
-                        resp = {"ok": False,
-                                "error": "鉴权失败：token 不匹配。"
-                                         "若刚升级过工具，跑一次 cadbridge stop 让桥接重启。"}
+        ``buf`` 是 bytearray，未消费的尾巴留在里面；``send`` 是发送响应的回调，
+        便于测试时替换掉真实 socket。
 
-                try:
-                    conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n")
-                                 .encode("utf-8"))
-                except OSError:
-                    return True
-                if resp.get("shutdown") or resp.get("quit"):
-                    return False
+        空行必须跳过：客户端探活时会开一条连接立刻关闭，若把它当成
+        ``{"cmd": ""}`` 走完整流程，就会触发 AutoCAD 健康检查 ——
+        一次只读的 status 查询会把 AutoCAD 给重启了。
+        """
+        stopping = False
+        while not stopping and b"\n" in buf:
+            line, _, rest = bytes(buf).partition(b"\n")
+            buf[:] = rest
+            if not line.strip():
+                continue
+            resp = self._handle_line(line)
+            send(resp)
+            stopping = bool(resp.get("shutdown") or resp.get("quit"))
+        return stopping
+
+    def _handle_line(self, line):
+        """把一行原始请求变成一行响应。鉴权、解析、重试都在这里。"""
+        try:
+            req = json.loads(line.decode("utf-8", "replace"))
+        except ValueError as e:
+            return {"ok": False, "error": "请求不是合法 JSON：%s" % e}
+
+        if not self._authorized(req):
+            self.log("拒绝了一个未通过鉴权的请求（cmd=%r）" % req.get("cmd"))
+            return {"ok": False,
+                    "error": "鉴权失败：token 不匹配。"
+                             "若刚升级过工具，跑一次 cadbridge stop 让桥接重启。"}
+        try:
+            return self._dispatch_with_retry(req)
         except Exception as e:
-            try:
-                payload = {"ok": False, "error": str(e)}
-                if os.environ.get("CADBRIDGE_DEBUG"):
-                    payload["tb"] = traceback.format_exc()
-                conn.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-            except Exception:
-                pass
-            return True
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            payload = {"ok": False, "error": str(e)}
+            if os.environ.get("CADBRIDGE_DEBUG"):
+                payload["tb"] = traceback.format_exc()
+            return payload
 
     def _dispatch_with_retry(self, req):
         """执行指令；AutoCAD 忙时按配置重试，掉线则重连后重试一次。"""

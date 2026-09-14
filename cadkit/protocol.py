@@ -61,12 +61,17 @@ def clear_state():
         pass
 
 
-def is_alive(state):
-    """state.json 里记的端口还有人在听吗？（判断桥接是真活着还是残留文件）"""
+def is_alive(state, timeout=0.5):
+    """state.json 里记的端口还有人在听吗？（判断桥接是真活着还是残留文件）
+
+    超时给得很短：回环地址上没监听的端口本就该立刻拒绝，实测这里的
+    ``create_connection`` 会一路等到超时才返回（1.5s），而这是自动刷新会
+    反复走的热路径 —— 1.5s × 每 5s 一次，会让界面三成时间处于「忙碌」。
+    """
     if not state:
         return False
     try:
-        s = socket.create_connection(("127.0.0.1", int(state["port"])), timeout=1.5)
+        s = socket.create_connection(("127.0.0.1", int(state["port"])), timeout=timeout)
         s.close()
         return True
     except Exception:

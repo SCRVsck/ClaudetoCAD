@@ -14,9 +14,20 @@ from . import paths, protocol
 
 
 def _spawn_cmd():
-    """构造拉起桥接的命令行 —— 区分源码运行与 exe 运行。"""
+    """构造拉起桥接的命令行 —— 区分源码运行与 exe 运行。
+
+    打包后有两个 exe（cadbridge.exe 控制台 / cadbridge-gui.exe 窗口），
+    桥接必须由**控制台那个**来跑：从 GUI 里派生 ``sys.executable --serve``
+    会得到 ``cadbridge-gui.exe --serve``，而 GUI 的 main 不解析参数、
+    直接开窗口 —— 于是桥接没起来，反而弹出一堆窗口。
+    """
     if paths.is_frozen():
-        # 打包后是同一个 exe，用 --serve 切到服务端模式
+        here = os.path.dirname(os.path.abspath(sys.executable))
+        cli = os.path.join(here, "cadbridge.exe")
+        if os.path.exists(cli):
+            return [cli, "--serve"]
+        # 只单独分发了 GUI exe 的情况：退回自己（cadbridge_gui.py 里
+        # 也处理了 --serve，会转而跑桥接）
         return [sys.executable, "--serve"]
     return [sys.executable, os.path.join(paths.install_dir(), "cadbridge.py"), "--serve"]
 
@@ -56,7 +67,12 @@ def ensure_running(timeout=180, log=None):
             _spawn_cmd(),
             cwd=paths.install_dir(),
             env=_clean_env(),
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+            # 必须用 CREATE_NO_WINDOW，不能只用 DETACHED_PROCESS：
+            # 从窗口子系统的 GUI exe 里派生控制台程序时，DETACHED_PROCESS
+            # 拦不住 Windows 给子进程新建控制台，结果会冒出一个黑色终端窗口
+            # 挂在旁边。CLI 场景看不出来（父进程本来就有控制台），
+            # 只有打包成 cadbridge-gui.exe 后才暴露。
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

@@ -19,6 +19,7 @@
 #define MyAppName "CadBridge"
 #define MyAppPublisher "CadBridge"
 #define MyAppExeName "cadbridge.exe"
+#define MyAppGuiExeName "cadbridge-gui.exe"
 #define MyAppURL "https://github.com/SCRVsck/ClaudetoCAD"
 
 [Setup]
@@ -61,11 +62,13 @@ english.PathNote=CadBridge was added to your user PATH. Open a new terminal to u
 
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#MyAppGuiExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "..\使用指南.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
+Name: "{group}\{#MyAppName} 控制台"; Filename: "{app}\{#MyAppGuiExeName}"
 Name: "{group}\{#MyAppName} 自检"; Filename: "{app}\{#MyAppExeName}"; Parameters: "doctor --deep"
 Name: "{group}\{#MyAppName} 状态"; Filename: "{app}\{#MyAppExeName}"; Parameters: "info"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
