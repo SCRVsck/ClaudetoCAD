@@ -429,7 +429,7 @@ class BridgeServer:
 
             # 尺寸也是普通图元，颜色/图层照样能改。
             # 注意尺寸对象和三维实体一样：早绑定包装里未必有 Color，走迟绑定。
-            if cmd.get("color") is not None or cmd.get("layer"):
+            if (cmd.get("color") is not None or cmd.get("layer")):
                 dd = dynamic.Dispatch(d)
                 if cmd.get("color") is not None:
                     dd.Color = int(cmd["color"])
