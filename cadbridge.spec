@@ -70,5 +70,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="assets/cadbridge.ico" if os.path.exists("assets/cadbridge.ico") else None,
     version="version_info.txt" if os.path.exists("version_info.txt") else None,
 )

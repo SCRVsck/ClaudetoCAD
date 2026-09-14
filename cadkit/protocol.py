@@ -15,10 +15,15 @@ from . import paths
 # 桥接是常驻进程，工具升级后老桥接还在跑的情形很常见（比如连接复用规则变了，
 # 新客户端的长连接打到「一条连接一条指令」的老服务端上就会出错）。
 # 版本不符时客户端自动重启桥接，用户不用手动 stop/start。
-PROTO = 2
+#
+# 2 -> 3：引入接入 token（见下），请求体多一个 _token 字段。
+PROTO = 3
 
 # 单条指令的字节上限（防止畸形请求把内存吃爆）
 MAX_FRAME = 64 * 1024 * 1024
+
+# 请求里携带接入 token 的字段名
+TOKEN_FIELD = "_token"
 
 
 # ---------------------------------------------------------------- state.json
@@ -140,6 +145,18 @@ def _read_line(conn, timeout):
     return buf.split(b"\n", 1)[0]
 
 
+def new_token():
+    """生成接入 token。
+
+    桥接监听在回环地址上，任何本地进程都能连上并发指令 —— 其中 ``sendcommand``
+    是原样执行的 AutoCAD 命令串，等于把 CAD 完全交出去。state.json 位于
+    ``%LOCALAPPDATA%``（按用户 ACL 隔离），token 放那里，别的用户读不到，
+    也就连不上；同一用户下的进程仍能读到，但那已经不在这个工具能设防的范围内了。
+    """
+    import secrets
+    return secrets.token_hex(32)
+
+
 def send(obj, timeout=180, state=None):
     """把一条指令发给桥接，返回响应 dict。
 
@@ -151,7 +168,12 @@ def send(obj, timeout=180, state=None):
     if not st:
         raise NotConnected("桥接没有在运行")
     port = int(st["port"])
-    payload = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
+    payload_obj = dict(obj)
+    token = st.get("token")
+    if token:
+        payload_obj[TOKEN_FIELD] = token
+    payload = (json.dumps(payload_obj, ensure_ascii=False) + "\n").encode("utf-8")
 
     with _lock:
         for attempt in (0, 1):

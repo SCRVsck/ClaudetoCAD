@@ -259,7 +259,7 @@ class TestServerEmptyRequest(unittest.TestCase):
 
 
 class FakeBridge:
-    """极简的假桥接，只用来数「客户端开了几条连接」。"""
+    """极简的假桥接，用来数「客户端开了几条连接」并记录收到的 token。"""
 
     def __init__(self):
         import socket as _s
@@ -271,6 +271,7 @@ class FakeBridge:
         self.port = self.sock.getsockname()[1]
         self.connections = 0
         self.requests = 0
+        self.tokens = []
         self._stop = False
 
     def serve_forever(self):
@@ -294,6 +295,8 @@ class FakeBridge:
                     if not line.strip():
                         continue
                     self.requests += 1
+                    self.tokens.append(json.loads(line.decode("utf-8")).get(
+                        protocol.TOKEN_FIELD))
                     resp = b'{"ok":true,"n":%d}\n' % self.requests
                     conn.sendall(resp)
             except Exception:
@@ -320,7 +323,9 @@ class TestConnectionReuse(TempHome):
         self.thread = threading.Thread(target=self.bridge.serve_forever, daemon=True)
         self.thread.start()
         protocol.close()
-        protocol.write_state({"port": self.bridge.port, "proto": protocol.PROTO})
+        self.token = "t" * 64
+        protocol.write_state({"port": self.bridge.port, "proto": protocol.PROTO,
+                              "token": self.token})
 
     def tearDown(self):
         protocol.close()
@@ -337,6 +342,11 @@ class TestConnectionReuse(TempHome):
                          "25 条请求不该开 25 条连接（实际开了 %d 条）"
                          % self.bridge.connections)
 
+    def test_request_carries_token(self):
+        protocol.request({"cmd": "ping"})
+        self.assertEqual(self.bridge.tokens, [self.token],
+                         "请求必须带上 state.json 里的接入 token")
+
     def test_reconnects_after_connection_dropped(self):
         protocol.request({"cmd": "ping"})
         self.assertEqual(self.bridge.connections, 1)
@@ -344,6 +354,41 @@ class TestConnectionReuse(TempHome):
         r = protocol.request({"cmd": "ping"})
         self.assertTrue(r["ok"])
         self.assertEqual(self.bridge.connections, 2, "断线后应能重连")
+
+
+class TestAuth(unittest.TestCase):
+    """桥接挂在回环端口上，不加鉴权的话任意本地进程都能发指令 ——
+    其中 sendcommand 是原样执行的 AutoCAD 命令串，等于把 CAD 交出去。"""
+
+    def _srv(self, token):
+        from cadkit import server
+        s = server.BridgeServer.__new__(server.BridgeServer)
+        s.token = token
+        return s
+
+    def test_correct_token_accepted(self):
+        self.assertTrue(self._srv("abc")._authorized({protocol.TOKEN_FIELD: "abc"}))
+
+    def test_wrong_token_rejected(self):
+        self.assertFalse(self._srv("abc")._authorized({protocol.TOKEN_FIELD: "abd"}))
+
+    def test_missing_token_rejected(self):
+        self.assertFalse(self._srv("abc")._authorized({"cmd": "count"}))
+
+    def test_non_string_token_rejected(self):
+        self.assertFalse(self._srv("abc")._authorized({protocol.TOKEN_FIELD: 123}))
+
+    def test_none_token_rejected(self):
+        self.assertFalse(self._srv("abc")._authorized({protocol.TOKEN_FIELD: None}))
+
+    def test_server_without_token_rejects_everything(self):
+        self.assertFalse(self._srv(None)._authorized({protocol.TOKEN_FIELD: "abc"}))
+
+    def test_tokens_are_random(self):
+        self.assertNotEqual(protocol.new_token(), protocol.new_token())
+
+    def test_token_is_long_enough(self):
+        self.assertGreaterEqual(len(protocol.new_token()), 32)
 
 
 if __name__ == "__main__":

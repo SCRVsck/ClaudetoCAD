@@ -130,6 +130,7 @@ class BridgeServer:
         self.doc = None
         self.info = {}
         self.port = None
+        self.token = None
         self.last_health = 0.0
 
     # ---------------------------------------------------------- 连接管理
@@ -408,6 +409,15 @@ class BridgeServer:
 
         return {"ok": False, "error": "unknown cmd: %s" % c}
 
+    # ------------------------------------------------------------ 鉴权
+    def _authorized(self, req):
+        """校验接入 token。用常数时间比较，避免时序侧信道。"""
+        import hmac
+        got = req.get(protocol.TOKEN_FIELD)
+        if not self.token or not isinstance(got, str):
+            return False
+        return hmac.compare_digest(got, self.token)
+
     # ------------------------------------------------------------ 主循环
     def serve_forever(self):
         lock = daemon.SingleInstance()
@@ -433,9 +443,13 @@ class BridgeServer:
         self.port = server.getsockname()[1]
         server.settimeout(0.2)
 
+        # 每次启动换一把新 token，和 state.json 一起放在用户私有目录里
+        self.token = protocol.new_token()
+
         protocol.write_state({
             "port": self.port, "pid": os.getpid(),
             "proto": protocol.PROTO,
+            "token": self.token,
             "mode": self.info.get("mode"), "progid": self.info.get("progid"),
             "acad_version": self.info.get("version"),
             "events": "off", "started": time.time(),
@@ -504,7 +518,13 @@ class BridgeServer:
                 except ValueError as e:
                     resp = {"ok": False, "error": "请求不是合法 JSON：%s" % e}
                 else:
-                    resp = self._dispatch_with_retry(req)
+                    if self._authorized(req):
+                        resp = self._dispatch_with_retry(req)
+                    else:
+                        self.log("拒绝了一个未通过鉴权的请求（cmd=%r）" % req.get("cmd"))
+                        resp = {"ok": False,
+                                "error": "鉴权失败：token 不匹配。"
+                                         "若刚升级过工具，跑一次 cadbridge stop 让桥接重启。"}
 
                 try:
                     conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n")

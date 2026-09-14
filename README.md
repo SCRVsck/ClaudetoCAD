@@ -43,19 +43,47 @@ cadbridge info
 ## 打包发布
 
 ```bash
-python build.py           # 产出 dist/cadbridge.exe（单文件，约 9 MB）
-python build.py --clean   # 先清理再打包
+python build.py              # 打包 exe（图标不存在会自动生成）
+python build.py --clean      # 先清理再打
+python build.py --portable   # 额外产出免安装 zip
+python build.py --installer  # 额外产出安装程序（需要 Inno Setup）
+python build.py --all        # 三样都出
 ```
 
-打包后目标机器**不需要装 Python**，只需要装 AutoCAD。
+三种分发形态：
+
+| 形态 | 产物 | 适用 |
+|------|------|------|
+| 裸 exe | `dist/cadbridge.exe` | 单文件，拷过去就能用 |
+| 便携包 | `dist/CadBridge-<版本>-portable.zip` | 内含 exe + 文档 + 「安装.cmd / 卸载.cmd」（把目录加进用户 PATH） |
+| 安装程序 | `dist/CadBridge-<版本>-setup.exe` | 向导式安装，自动配 PATH，卸载时会**先停桥接**再删文件 |
+
+打包后目标机器**不需要装 Python**，只需要装 AutoCAD。安装程序按用户安装
+（`PrivilegesRequired=lowest`），不弹 UAC。
+
+> 编译安装程序需要 [Inno Setup 6](https://jrsoftware.org/isdl.php)；
+> 缺了不会导致构建失败，只会跳过并提示。
 
 | 项 | 值 |
 |----|----|
-| 产物 | `dist/cadbridge.exe` |
+| 入口模块 | `cadbridge.py` |
+| 打包配置 | `cadbridge.spec` · 安装脚本 `installer/cadbridge.iss` |
+| 图标 | `assets/cadbridge.ico`（由 `assets/make_icon.py` 生成） |
 | 运行期数据 | `%LOCALAPPDATA%\CadBridge\`（state / log / config） |
-| 安装目录 | exe 所在目录（只读资源） |
 
 数据目录可用环境变量 `CADBRIDGE_HOME` 覆盖（多实例隔离 / 测试用）。
+
+## 安全
+
+桥接监听在回环地址（127.0.0.1），**并且要求接入 token**。token 每次启动随机生成，
+写在 `%LOCALAPPDATA%\CadBridge\state.json`（按用户 ACL 隔离），客户端自动携带、
+服务端常数时间比对。
+
+没有这道校验的话，本机任意进程都能连上端口发指令 —— 其中 `sendcommand` 是
+原样执行的 AutoCAD 命令串（例如 `_ERASE _ALL`），等于把 CAD 完全交出去。
+
+> 同一用户下的进程仍能读到 token。要防住这个量级的攻击者需要 OS 级隔离
+> （具名管道 + 安全描述符），目前没做。
 
 ## 运行前提
 
