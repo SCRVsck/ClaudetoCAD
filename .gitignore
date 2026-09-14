@@ -1,7 +1,9 @@
 # 运行时产物
 state.json
 bridge.log
+bridge.lock
 events.jsonl
+config.json
 
 # AutoCAD 锁文件 / 备份
 *.dwl
@@ -11,6 +13,11 @@ events.jsonl
 # Python
 __pycache__/
 *.pyc
+
+# 打包产物（由 build.py 从源码生成，不入库）
+/dist/
+/build/
+*.manifest
 
 # 临时截图
 *.png
