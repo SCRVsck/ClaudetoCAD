@@ -1,0 +1,81 @@
+name: CI
+
+# 这个项目有个特殊之处：**大量问题只在打包成 exe 之后才暴露**
+# （冻结后的 argv 起点、stdout 编码、onefile 解包目录、DETACHED_PROCESS
+#  拦不住控制台窗口……）。所以 CI 不能只跑单元测试，
+# 必须每次都真的打一遍包、再拿打包产物冒烟。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 单元测试
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pywin32
+
+      - name: 跑回归测试
+        run: python -m unittest discover -s tests -v
+
+      - name: 自检命令能跑通
+        # CI 机器上没有 AutoCAD，doctor 判「故障」并返回 1 是**正确行为**，
+        # 这里只验证它不会崩，所以不因退出码失败。
+        continue-on-error: true
+        run: python cadbridge.py doctor
+
+  build:
+    name: 打包冒烟
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pywin32 pyinstaller
+
+      - name: 打包
+        run: python build.py
+
+      - name: 打包产物必须真的能跑
+        shell: pwsh
+        run: |
+          # 版本号能打出来 = 冻结模式下 argv 处理正确
+          # （曾经打包版所有子命令都退化成打印帮助）
+          .\dist\cadbridge.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "cadbridge.exe --version 失败" }
+
+          # 输出不能是乱码：冻结后 stdout 必须钉成 UTF-8
+          $out = .\dist\cadbridge.exe --version | Out-String
+          if ($out -notmatch 'CadBridge') { throw "版本输出异常：$out" }
+
+          # doctor 在没有 AutoCAD 的机器上返回 1 属正常，只验证不崩
+          .\dist\cadbridge.exe doctor
+          Write-Host "doctor 退出码 $LASTEXITCODE（无 AutoCAD 时为 1，正常）"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadbridge-windows
+          path: |
+            dist/cadbridge.exe
+            dist/cadbridge-gui.exe
+          if-no-files-found: error

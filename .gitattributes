@@ -1,0 +1,11 @@
+# 统一按 LF 存储，避免每次提交都刷一屏 "LF will be replaced by CRLF" 警告。
+# 工作区里也保持 LF —— Python 和 Markdown 都不在乎，
+# 而真正需要 CRLF 的 .cmd/.bat/.ps1 是 build.py 在打包时生成的（并不入库），
+# 那边的换行由生成代码显式控制。
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.dwg binary
+*.zip binary
+*.exe binary
