@@ -100,6 +100,33 @@ python build.py --all        # 三样都出
 
 数据目录可用环境变量 `CADBRIDGE_HOME` 覆盖（多实例隔离 / 测试用）。
 
+## 发布
+
+打 tag 并推送：
+
+```bash
+# 版本号在三处，改完要一起提交
+#   cadkit/__init__.py  __version__
+#   version_info.txt    filevers / FileVersion / ProductVersion
+#   installer/cadbridge.iss 里的默认 MyAppVersion（build.py 也会传）
+
+python build.py --clean --all      # 产出 dist/ 下四样东西
+git add -A && git commit -m "..." && git tag -a v0.3.0 -m "..."
+git push origin main && git push origin v0.3.0
+```
+
+**把编译好的产物附到 Release**（`dist/` 不入库，所以要单独上传）：
+
+```bash
+winget install GitHub.cli          # 若还没装
+gh auth login                      # 交互式，只需一次
+gh release create v0.3.0 dist/*.exe dist/*.zip \
+   --title "CadBridge v0.3.0" --notes-file CHANGELOG.md
+```
+
+> 上传 Release 用的是 GitHub API，需要 `gh` 的凭据 ——
+> 它跟 `git push` 用的凭据不是一回事，得单独登录一次。
+
 ## 安全
 
 桥接监听在回环地址（127.0.0.1），**并且要求接入 token**。token 每次启动随机生成，
