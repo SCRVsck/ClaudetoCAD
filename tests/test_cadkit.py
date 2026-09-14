@@ -556,6 +556,36 @@ class TestSpawnCmd(unittest.TestCase):
         self.assertEqual(ran, [1], "GUI 入口没有把 --serve 转给桥接")
 
 
+class TestAcadProcessCheck(unittest.TestCase):
+    """拉起 AutoCAD 前必须先用进程表确认一遍。
+
+    只看 ``GetActiveObject`` 是不够的：AutoCAD 刚启动或正忙时会话还没注册进
+    ROT，探测会失败。若据此判定「没开」就再拉一个，结果是**一个窗口接一个
+    窗口地冒出来** —— 而 AutoCAD 允许多实例，全程不报任何错。
+    """
+
+    def test_returns_bool(self):
+        self.assertIsInstance(acad.acad_process_running(), bool)
+
+    def test_matches_windows_process_list(self):
+        import subprocess
+        try:
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq acad.exe", "/NH"],
+                                 capture_output=True, text=True, timeout=20)
+            actual = "acad.exe" in (out.stdout or "").lower()
+        except Exception:
+            self.skipTest("拿不到 tasklist 输出")
+        self.assertEqual(acad.acad_process_running(), actual,
+                         "进程表检查与 Windows 实际状态不一致")
+
+    def test_probe_is_cheap(self):
+        """它会被反复调用，不能太慢。"""
+        import time
+        t = time.time()
+        acad.acad_process_running()
+        self.assertLess(time.time() - t, 1.0)
+
+
 class TestGuiStatus(TempHome):
     """GUI 的状态采集刻意做成不碰控件的纯函数，因此能脱离 Tk 测。
 

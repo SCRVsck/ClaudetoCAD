@@ -166,6 +166,56 @@ def _wait_for_document(app, timeout):
                     "请手动打开 AutoCAD 看一眼。%s" % (timeout, ("最后错误：%s" % last) if last else ""))
 
 
+def acad_process_running():
+    """进程表里有没有 acad.exe。
+
+    为什么不能只看 ``GetActiveObject``：AutoCAD 刚启动、或正忙时会话还没
+    注册进 ROT，此时探测会失败 —— 若据此判定「没装/没开」就再拉一个，
+    结果是**一个窗口接一个窗口地冒出来**，而且因为 AutoCAD 允许多实例，
+    不会报任何错。所以拉起之前先用进程表确认一遍。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return False
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_char * 260)]
+
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == INVALID:
+            return False
+        try:
+            entry = PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+            ok = k32.Process32First(snap, ctypes.byref(entry))
+            while ok:
+                if entry.szExeFile.decode("mbcs", "replace").lower() == "acad.exe":
+                    return True
+                ok = k32.Process32Next(snap, ctypes.byref(entry))
+        finally:
+            k32.CloseHandle(snap)
+    except Exception:
+        pass
+    return False
+
+
 def connect(progid=None, autostart=True, timeout=None, log=None):
     """连接 AutoCAD，必要时拉起。返回 ``(app, doc, info)``。
 
@@ -208,14 +258,25 @@ def connect(progid=None, autostart=True, timeout=None, log=None):
 
     # --- 3) 拉起 ---------------------------------------------------------
     if exe:
-        log("正在启动 AutoCAD %s：%s" % (tgt_ver, exe))
-        try:
-            # /Automation 让 CAD 以可自动化模式启动；不阻塞，随后轮询。
-            subprocess.Popen([exe, "/Automation"],
-                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
-        except OSError as e:
-            raise AcadError("启动 AutoCAD 失败（%s）：%s" % (exe, e))
-        app = _wait_for_instance(tgt_progid, timeout)
+        # 进程已经在跑、只是 COM 还没就绪（刚启动/正忙）时，**等它**，
+        # 不要再拉一个 —— 否则会一个接一个地冒窗口，且不报任何错。
+        if acad_process_running():
+            log("检测到 acad.exe 已在运行（COM 未就绪），等待其注册…")
+            try:
+                app = _wait_for_instance(tgt_progid, min(timeout, 60))
+            except AcadError:
+                raise AcadError(
+                    "acad.exe 已在运行，但一直没注册成 COM 对象。\n"
+                    "常见原因：它停在启动对话框/许可界面，或正忙。"
+                    "请手动看一眼 AutoCAD 的窗口。")
+        else:
+            log("正在启动 AutoCAD %s：%s" % (tgt_ver, exe))
+            try:
+                subprocess.Popen([exe, "/Automation"],
+                                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            except OSError as e:
+                raise AcadError("启动 AutoCAD 失败（%s）：%s" % (exe, e))
+            app = _wait_for_instance(tgt_progid, timeout)
     else:
         log("注册表里没解析出 acad.exe，改用 COM Dispatch 启动 AutoCAD %s" % tgt_ver)
         try:
