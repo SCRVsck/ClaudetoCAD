@@ -17,6 +17,7 @@
 import math
 import os
 import sys
+import time
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
@@ -93,22 +94,34 @@ CASES = {
     },
 }
 
-# ======================================================== 图幅（A2 1:100）
-SHEET_W, SHEET_H = 59400.0, 42000.0
-MARGIN = 2500.0
-# 剖面在图纸中的落位（放左上，右下留给图签）
-OX, OY = 20000.0, 36000.0
-# 图签栏
-TB_W, TB_H = 18000.0, 7000.0
-TB_X, TB_Y = SHEET_W - MARGIN - TB_W, MARGIN
-# 土层指标表
-TBL_X, TBL_Y = 31500.0, 34500.0
+# ===================================================== 图纸（用标准图框块）
+# 不再自己画图框 —— 直接插标准图框块 CSSDI-A3，与演示图**同一插入点、同一比例**。
+# 它内部嵌着 设计所图框A3（420×297 的纸面尺寸，按 100 倍放大）：
+#     CSSDI-A3 @ (-1000,-11000) scale 1
+#       └ 设计所图框A3 @ (-18750,-14850) scale 100
+# 于是图纸 1 的图框落在  x -19750..22250, y -25850..3850（42000×29700）
+# 这与演示图里文字的实际位置完全吻合（院名 x≈15547、土层标注 x≈-14200）。
+FRAME_INSERT = [-1000.0, -11000.0]
+FRAME_BOX = (-19750.0, -25850.0, 22250.0, 3850.0)     # x0,y0,x1,y1
+SIGN_COL_X = 14944.0        # 图签栏左边界（图框内右侧那一栏）
+
+# 文字：标准图里 566 个文字**全部**用 PM-TEXT，字高以 400 为主。
+# 但它的原字体是 Tssdeng.shx（探索者 TSSD 字体，路径指向 AutoCAD 2012），
+# 本机没有这个文件 —— 缺字体时 AutoCAD **什么都不画**（不是显示成 ?，是彻底空白），
+# 极难排查。所以先试原字体，装了就照用，没装才换成同类的国标 SHX 组合。
+TEXT_STYLE = "PM-TEXT"
+STD_FONT, STD_BIGFONT = "tssdeng.shx", "gbcbig.shx"
+ALT_FONT, ALT_BIGFONT = "gbenor.shx", "gbcbig.shx"
+TXT = 400.0
+DIMTXT = 350.0
+TITLE_H = 600.0
+
+# 剖面在图纸中的落位（让剖面落在图签栏左侧的绘图区里）
+OX, OY = -2250.0, 600.0
 
 # 剖面自身范围（相对坡顶原点）
 X_LEFT = -15000.0
 X_RIGHT = 8000.0
-TXT = 380.0
-DIMTXT = 320.0
 FAILED = []
 
 
@@ -156,31 +169,23 @@ def call(req, quiet=False, record=True):
 def poly(pts, layer, closed=True, xform=True):
     if xform:
         pts = [YX(x, y) for x, y in pts]
-    r = call({"cmd": "add_polyline", "closed": closed,
-              "points": [[x, y, 0.0] for x, y in pts]})
-    if r.get("ok") and layer:
-        call({"cmd": "setprop", "handle": r["handle"], "layer": layer}, quiet=True)
-    return r.get("handle")
+    return call({"cmd": "add_polyline", "closed": closed, "layer": layer,
+                 "points": [[x, y, 0.0] for x, y in pts]}).get("handle")
 
 
 def line(p1, p2, layer, xform=True):
     if xform:
         p1, p2 = YX(*p1), YX(*p2)
-    r = call({"cmd": "add_line", "start": [p1[0], p1[1], 0.0],
-              "end": [p2[0], p2[1], 0.0]})
-    if r.get("ok") and layer:
-        call({"cmd": "setprop", "handle": r["handle"], "layer": layer}, quiet=True)
-    return r.get("handle")
+    return call({"cmd": "add_line", "layer": layer,
+                 "start": [p1[0], p1[1], 0.0],
+                 "end": [p2[0], p2[1], 0.0]}).get("handle")
 
 
 def text(s, at, h=TXT, layer="注释", xform=True):
     if xform:
         at = YX(*at)
-    r = call({"cmd": "add_text", "text": s, "insert": [at[0], at[1], 0.0],
-              "height": h})
-    if r.get("ok") and layer:
-        call({"cmd": "setprop", "handle": r["handle"], "layer": layer}, quiet=True)
-    return r.get("handle")
+    return call({"cmd": "add_text", "text": s, "layer": layer,
+                 "insert": [at[0], at[1], 0.0], "height": h}).get("handle")
 
 
 def dim(p1, p2, loc, angle, color=3, h=DIMTXT, mode="rotated",
@@ -195,18 +200,58 @@ def dim(p1, p2, loc, angle, color=3, h=DIMTXT, mode="rotated",
     return call(req, quiet=True)
 
 
-# ------------------------------------------------------------ 图层与线型
-def setup_layers():
-    print("[1] 图层 / 线型 / 文字样式（按 standard.py 的表）")
-    # 中文必须先建 TrueType 样式，否则整张图的中文会静默变成 ?
-    call({"cmd": "textstyle", "name": "工程图", "font": "SimHei"}, quiet=True)
-    for lt in standard.LINETYPES:
-        call({"cmd": "linetype", "name": lt, "file": "acad.lin"}, quiet=True)
+# ------------------------------------------------------- 图纸准备
+def ensure_layers():
+    """补齐标准表里有、但模板里缺的图层。
+
+    模板是演示图，图层未必齐全 —— 比如「桩间挂网」在演示图里就被清理掉了。
+    给实体设一个不存在的图层会报「未找到主键」，而且**报错点在建图元那一步**，
+    很容易误以为是几何数据有问题。
+    已有的图层一律不动（保留模板里的颜色/线型设置），只建缺的。
+    """
+    t = cad.send({"cmd": "tables"})
+    have = {L["name"] for L in t.get("layers", [])}
+    made = []
     for name, (lt, color) in standard.LAYERS.items():
-        call({"cmd": "layer", "name": name, "color": color, "linetype": lt},
-             quiet=True)
-    print("    %d 个图层，线型 %s" % (len(standard.LAYERS),
-                                    "/".join(standard.LINETYPES)))
+        if name not in have:
+            call({"cmd": "layer", "name": name, "color": color,
+                  "linetype": lt}, quiet=True)
+            made.append(name)
+    if made:
+        print("    补建缺失图层：%s" % "、".join(made))
+    else:
+        print("    模板图层齐全（%d 个标准图层都在）" % len(standard.LAYERS))
+
+
+def setup_sheet():
+    """插标准图框、补图层、切标准文字样式。
+
+    刻意**不重建已有图层**：模板里是演示图那 23 个标准图层（含 签名、
+    PUB_TITLE、PUB_DIM 这些 VB 里没有的），重建反而会把人家配好的
+    颜色/线型改掉。
+    """
+    print("[1] 标准图框 / 图层 / 文字样式")
+    ensure_layers()
+
+    r = call({"cmd": "insert", "name": "CSSDI-A3", "layer": "图框",
+              "point": [FRAME_INSERT[0], FRAME_INSERT[1], 0.0],
+              "xscale": 1.0, "yscale": 1.0, "zscale": 1.0})
+    print("    图框句柄 %s" % r.get("handle"))
+
+    # 先按标准原样设字体；本机没有 Tssdeng.shx 时才换替代品
+    base = {"cmd": "textstyle", "name": TEXT_STYLE, "width": 0.7, "height": 0.0}
+    r = call({**base, "font": STD_FONT, "bigfont": STD_BIGFONT},
+             quiet=True, record=False)
+    if r.get("ok"):
+        used = "%s + %s（标准原字体）" % (STD_FONT, STD_BIGFONT)
+    else:
+        r2 = call({**base, "font": ALT_FONT, "bigfont": ALT_BIGFONT}, quiet=True)
+        used = ("%s + %s（替代；本机缺 %s）" % (ALT_FONT, ALT_BIGFONT, STD_FONT)
+                if r2.get("ok") else "SimHei")
+        if not r2.get("ok"):
+            call({**base, "font": "SimHei"}, quiet=True)
+    call({"cmd": "activestyle", "name": TEXT_STYLE}, quiet=True)
+    print("    文字样式 %s：%s，字高 %g" % (TEXT_STYLE, used, TXT))
 
 
 # ---------------------------------------------------------------- 土层
@@ -363,88 +408,20 @@ def draw_dims():
             math.pi / 2)
 
 
-def draw_soil_table():
-    """土层物理力学指标表 —— 这类图纸的标配，也把右侧空白利用起来。"""
-    print("[7] 土层物理力学指标表")
-    cols = [("编号", 1200), ("土层名称", 3400), ("层厚(m)", 1600),
-            ("层底埋深(m)", 2200), ("C(kPa)", 1600), ("φ(°)", 1300)]
-    rows = []
-    prev = 0.0
-    for no, name, depth_m, c, phi in P["土层"]:
-        rows.append((no, name, "%.1f" % (depth_m - prev),
-                     "%.1f" % depth_m, "%g" % c, "%g" % phi))
-        prev = depth_m
+def draw_notes_and_title():
+    """图名 + 设计说明。
 
-    rh = 900.0
-    tw = sum(c[1] for c in cols)
-    th = rh * (len(rows) + 1)
-    x0, y1 = TBL_X, TBL_Y
-    y0 = y1 - th
+    图框和图签栏**不在这里画** —— 那是标准块 CSSDI-A3 的职责，
+    自己画一套就又不是标准了。
+    """
+    print("[6] 图名 / 设计说明")
+    x0 = FRAME_BOX[0] + 2500
+    y_base = Y_SOIL_BOT + OY
 
-    text("土层物理力学指标", (x0, y1 + 700), h=420, layer="注释", xform=False)
-    poly([(x0, y0), (x0 + tw, y0), (x0 + tw, y1), (x0, y1)], "其它", xform=False)
-    # 表头分隔线
-    line((x0, y1 - rh), (x0 + tw, y1 - rh), "其它", xform=False)
-    xs = [x0]
-    for _t, w in cols:
-        xs.append(xs[-1] + w)
-    for x in xs[1:-1]:
-        line((x, y0), (x, y1), "其它", xform=False)
-
-    for j, (t, _w) in enumerate(cols):
-        text(t, (xs[j] + 180, y1 - rh + 250), h=330, layer="其它", xform=False)
-    for i, r in enumerate(rows):
-        yy = y1 - rh * (i + 2) + 250
-        for j, v in enumerate(r):
-            text(v, (xs[j] + 180, yy), h=330, layer="其它", xform=False)
-    print("    %d 层 × %d 列" % (len(rows), len(cols)))
-
-
-def draw_notes_and_frame():
-    print("[6] 图框 / 图签 / 设计说明")
-    # 图框
-    poly([(MARGIN, MARGIN), (SHEET_W - MARGIN, MARGIN),
-          (SHEET_W - MARGIN, SHEET_H - MARGIN), (MARGIN, SHEET_H - MARGIN)],
-         "图框", xform=False)
-
-    # ---- 图签栏 ----
-    x0, y0 = TB_X, TB_Y
-    x1, y1 = TB_X + TB_W, TB_Y + TB_H
-    poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], "图框", xform=False)
-    for i in range(1, 5):
-        yy = y0 + TB_H * i / 5.0
-        line((x0, yy), (x1, yy), "图框", xform=False)
-        line((x0 + TB_W * 0.62, yy), (x1, yy), "图框", xform=False)
-    line((x0 + TB_W * 0.62, y0), (x0 + TB_W * 0.62, y0 + TB_H * 4 / 5.0),
-         "图框", xform=False)
-
-    rows = [
-        ("设计单位", "（此处填设计单位）"),
-        ("工程名称", "%s基坑支护工程" % P["名称"]),
-        ("图名", P["图名"]),
-        ("设计号 / 图号", "%s / %s" % (P["设计号"], P["图号"])),
-        ("日期", P["日期"]),
-    ]
-    for i, (k, v) in enumerate(rows):
-        yy = y0 + TB_H * (4 - i) / 5.0 + TB_H / 10.0 - 180
-        text(k, (x0 + 400, yy), h=300, layer="图框", xform=False)
-        text(v, (x0 + TB_W * 0.63 + 400, yy), h=300, layer="图框", xform=False)
-
-    sig = ["设计", "制图", "校核", "审核", "审定"]
-    for i, s in enumerate(sig):
-        xx = x0 + 400 + i * 1150
-        text(s, (xx, y0 + TB_H / 10.0 - 180), h=300, layer="图框", xform=False)
-        line((xx - 200, y0 + TB_H / 10.0 - 600), (xx + 900, y0 + TB_H / 10.0 - 600),
-             "图框", xform=False)
-
-    # ---- 图名（剖面正下方）----
-    text(P["图名"], (MARGIN + 2000, Y_SOIL_BOT + OY - 2600), h=900, layer="图名",
+    text(P["图名"], (x0, y_base - 1400), h=TITLE_H, layer="图名", xform=False)
+    text("  比例 %s" % P["比例"], (x0, y_base - 2500), h=TXT, layer="图名",
          xform=False)
-    text("比例 %s" % P["比例"], (MARGIN + 2000, Y_SOIL_BOT + OY - 3900),
-         h=560, layer="图名", xform=False)
 
-    # ---- 设计说明（图名下方，与图签同一水平带）----
-    nx, ny = MARGIN + 2000, Y_SOIL_BOT + OY - 5600
     notes = [
         "设计说明：",
         "1 图中标高以米（m）为单位，其他尺寸均以毫米（mm）为单位；",
@@ -457,33 +434,64 @@ def draw_notes_and_frame():
         "7 开挖应分层分段进行，严禁超挖，开挖至基底后及时浇筑垫层；",
         "8 未尽事宜按相应规范执行。",
     ]
+    # 两栏排布 —— 图框下方只有约 6m 高的余地，单栏放不下 9 行
+    ny = y_base - 3600
+    half = (len(notes) + 1) // 2
     for i, s in enumerate(notes):
-        text(s, (nx, ny - i * 700), h=340, layer="设计说明", xform=False)
+        col, row = (0, i) if i < half else (1, i - half)
+        text(s, (x0 + col * 17500, ny - row * 620), h=TXT,
+             layer="设计说明", xform=False)
+
+
+def prepare_from_template(case_name):
+    """从演示图复制一份干净模板并打开。
+
+    演示图里带着这套标准的**图框块、23 个图层、5 个文字样式、2 个标注样式** ——
+    这些才是「标准」的载体，从零画一个图框永远只是「像」。
+    复制过来、清空模型空间（块表/样式表不受影响），再在里面画新图。
+    """
+    import shutil
+    src = os.path.join(BASE, "eg", "演示.dwg")
+    outdir = os.path.join(BASE, "out")
+    os.makedirs(outdir, exist_ok=True)
+    dst = os.path.join(outdir, "%s.dwg" % CASES[case_name]["图名"])
+    if not os.path.exists(src):
+        print("找不到模板 %s —— 请把演示图放在 eg/ 下" % src)
+        return None
+    call({"cmd": "closedocs"}, quiet=True)          # 释放文件占用，否则复制会失败
+    time.sleep(1.0)
+    shutil.copy2(src, dst)
+    r = call({"cmd": "open", "path": dst})
+    e = call({"cmd": "erase_all"})
+    print("[0] 模板 %s：打开 %s 图元 → 清空后 %s"
+          % (os.path.basename(src), r.get("entities"), e.get("after")))
+    return dst
 
 
 def main():
-    name = next((a for a in sys.argv[1:] if not a.startswith("-")), "CD段")
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    name = args[0] if args else "CD段"
     if name not in CASES:
         print("未知工点 %r，可选：%s" % (name, "、".join(CASES)))
         return 2
     load_case(name)
 
-    if "--new" in sys.argv:
-        print("[0] 新建图纸")
-        call({"cmd": "new"})
-
     print("=== 生成 %s ===" % P["图名"])
-    setup_layers()
+    if "--template" in sys.argv or "--new" in sys.argv:
+        prepare_from_template(name)
+
+    setup_sheet()
     draw_soils()
     draw_structure()
     draw_load()
     draw_dims()
-    draw_notes_and_frame()
-    draw_soil_table()
+    draw_notes_and_title()
 
     # 缩放到图框
+    x0, y0, x1, y1 = FRAME_BOX
     call({"cmd": "zoom", "mode": "center",
-          "center": [SHEET_W / 2, SHEET_H / 2, 0.0], "height": SHEET_H * 1.12})
+          "center": [(x0 + x1) / 2, (y0 + y1) / 2, 0.0],
+          "height": (y1 - y0) * 1.12})
 
     print("\n完成。实体总数 %s；失败项：%s"
           % (cad.send({"cmd": "count"}).get("count"), FAILED if FAILED else "无"))

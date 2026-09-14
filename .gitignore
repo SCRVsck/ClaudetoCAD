@@ -5,10 +5,11 @@ bridge.lock
 events.jsonl
 config.json
 
-# AutoCAD 锁文件 / 备份
+# AutoCAD 锁文件 / 备份 / 自动保存
 *.dwl
 *.dwl2
 *.bak
+Drawing[0-9]*.dwg
 
 # Python
 __pycache__/
@@ -25,3 +26,6 @@ __pycache__/
 # 参考资料（用户提供的原始资料：VBA 模块、演示图纸、参数表）
 # 属于输入数据而非本项目源码，且体积不小，不入库
 /eg/
+
+# 生成的图纸（由 eg/演示.dwg 当模板产出，可随时重生成）
+/out/

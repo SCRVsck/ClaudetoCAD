@@ -99,6 +99,11 @@ def _entity_info(e):
         elif name.endswith("Text") or name.endswith("MText"):
             info["Text"] = d.TextString
             info["Insert"] = list(d.InsertionPoint)
+            for k in ("StyleName", "Height", "Rotation"):
+                try:
+                    info[k] = getattr(d, k)
+                except Exception:
+                    pass
         elif name.endswith("Point"):
             info["Coord"] = list(d.Coordinate)
         elif "Polyline" in name:
@@ -141,6 +146,13 @@ def _entity_info(e):
                 info["Insert"] = list(d.InsertionPoint)
             except Exception:
                 pass
+            # 插入比例很关键：这套图框块是 420×297 的**纸面毫米**尺寸，
+            # 插进 mm 绘图环境要放 100 倍才对得上 1:100。
+            for k in ("XScaleFactor", "YScaleFactor", "Rotation"):
+                try:
+                    info[k] = float(getattr(d, k))
+                except Exception:
+                    pass
     except Exception:
         pass
     return info
@@ -237,6 +249,19 @@ class BridgeServer:
             path = os.path.abspath(str(cmd["path"]))
             if not os.path.exists(path):
                 return {"ok": False, "error": "文件不存在：%s" % path}
+            # 已经打开就激活它 —— 重复 Open 同一个文件会**再开一个新文档**，
+            # 结果一堆同名标签页，后续操作落在哪个上完全不确定。
+            for i in range(int(app.Documents.Count)):
+                try:
+                    d = app.Documents.Item(i)
+                    if os.path.abspath(str(d.FullName)).lower() == path.lower():
+                        d.Activate()
+                        self.doc = d
+                        return {"ok": True, "name": d.Name, "full": d.FullName,
+                                "already_open": True,
+                                "entities": int(d.ModelSpace.Count)}
+                except Exception:
+                    pass
             try:
                 d = app.Documents.Open(path)
             except Exception as e:
@@ -245,6 +270,24 @@ class BridgeServer:
                 self.doc = d
             return {"ok": True, "name": d.Name, "full": d.FullName,
                     "entities": int(d.ModelSpace.Count)}
+
+        if c == "closedocs":
+            """关掉所有文档（默认不保存），只留 keep 指定的那张。"""
+            keep = cmd.get("keep")
+            closed = []
+            for i in range(int(app.Documents.Count) - 1, -1, -1):
+                try:
+                    d = app.Documents.Item(i)
+                    if keep and str(d.Name).lower() == str(keep).lower():
+                        continue
+                    nm = str(d.Name)
+                    d.Close(False)
+                    closed.append(nm)
+                except Exception:
+                    pass
+            self.doc = app.ActiveDocument if int(app.Documents.Count) else None
+            return {"ok": True, "closed": closed,
+                    "remaining": int(app.Documents.Count)}
 
         if c == "activate":
             # 切到某张已打开的图纸（按名字）
@@ -283,18 +326,31 @@ class BridgeServer:
                     "entities": int(ms.Count) if ok else None}
 
         # ---------------- 基础绘图 ----------------
+        # 建图元时直接支持 layer / color：早先是「先创建、再按句柄 setprop」，
+        # 那条路要 HandleToObject 回查，偶发「未找到主键」失败，
+        # 结果图元留在当前层上（比如模板的「地下室」），很难发现。
+        def _finish(e, spec):
+            if spec.get("layer") or spec.get("color") is not None:
+                de = dynamic.Dispatch(e)
+                if spec.get("layer"):
+                    de.Layer = str(spec["layer"])
+                if spec.get("color") is not None:
+                    de.Color = int(spec["color"])
+            return {"ok": True, "handle": e.Handle, "object": e.ObjectName,
+                    "layer": str(spec.get("layer") or "")}
+
         if c == "add_line":
             e = ms.AddLine(_pt(*cmd["start"]), _pt(*cmd["end"]))
-            return {"ok": True, "handle": e.Handle, "object": e.ObjectName}
+            return _finish(e, cmd)
 
         if c == "add_circle":
             e = ms.AddCircle(_pt(*cmd["center"]), float(cmd["radius"]))
-            return {"ok": True, "handle": e.Handle, "object": e.ObjectName}
+            return _finish(e, cmd)
 
         if c == "add_text":
             e = ms.AddText(str(cmd["text"]), _pt(*cmd["insert"]),
                            float(cmd.get("height", 2.5)))
-            return {"ok": True, "handle": e.Handle, "object": e.ObjectName}
+            return _finish(e, cmd)
 
         if c == "add_polyline":
             pts = []
@@ -309,11 +365,234 @@ class BridgeServer:
                     e.Closed = True
                 except Exception:
                     pass
-            return {"ok": True, "handle": e.Handle, "object": e.ObjectName}
+            return _finish(e, cmd)
 
         if c == "add_point":
             e = ms.AddPoint(_pt(*cmd["point"]))
-            return {"ok": True, "handle": e.Handle, "object": e.ObjectName}
+            return _finish(e, cmd)
+
+        # ---------------- 图面标准（表对象）----------------
+        # 复刻一套既有图纸的标准，第一步就是把它真实用到的图层/块/样式读出来，
+        # 而不是凭印象另建一套 —— 后者做出来永远「像但不是」。
+        if c == "tables":
+            from win32com.client import dynamic as _dyn
+            out = {}
+
+            if cmd.get("layers", True):
+                lyr = []
+                for i in range(int(doc.Layers.Count)):
+                    try:
+                        L = _dyn.Dispatch(doc.Layers.Item(i))
+                        lyr.append({
+                            "name": str(L.Name),
+                            "color": int(L.Color),
+                            "linetype": str(L.Linetype),
+                            "lineweight": int(L.Lineweight),
+                            "plottable": bool(L.Plottable),
+                            # 从既有图纸当模板时，图层开关状态会一并带过来 ——
+                            # 被关掉的图层上画什么都是「看不见」，很容易误判成没画上
+                            "on": bool(L.LayerOn),
+                            "frozen": bool(L.Freeze),
+                            "locked": bool(L.Lock),
+                        })
+                    except Exception:
+                        pass
+                out["layers"] = lyr
+
+            if cmd.get("blocks"):
+                blk = []
+                for i in range(int(doc.Blocks.Count)):
+                    try:
+                        B = doc.Blocks.Item(i)
+                        nm = str(B.Name)
+                        if nm.startswith("*"):      # 跳过 *Model_Space 等匿名块
+                            continue
+                        blk.append({"name": nm,
+                                    "count": int(B.Count),
+                                    "is_layout": bool(B.IsLayout)})
+                    except Exception:
+                        pass
+                out["blocks"] = blk
+
+            if cmd.get("textstyles"):
+                ts = []
+                for i in range(int(doc.TextStyles.Count)):
+                    try:
+                        T = _dyn.Dispatch(doc.TextStyles.Item(i))
+                        ts.append({"name": str(T.Name),
+                                   "font": str(T.fontFile),
+                                   "height": float(T.Height),
+                                   "width": float(T.Width)})
+                    except Exception:
+                        pass
+                out["textstyles"] = ts
+
+            if cmd.get("dimstyles"):
+                ds = []
+                for i in range(int(doc.DimStyles.Count)):
+                    try:
+                        D = _dyn.Dispatch(doc.DimStyles.Item(i))
+                        ds.append({"name": str(D.Name)})
+                    except Exception:
+                        pass
+                out["dimstyles"] = ds
+
+            return {"ok": True, **out}
+
+        if c == "attrs":
+            """读块引用的属性（图签栏那些格子都是属性，不是普通文字）。"""
+            br = doc.HandleToObject(str(cmd["handle"]))
+            out = []
+            try:
+                for a in br.GetAttributes():
+                    out.append({"tag": str(a.TagString),
+                                "value": str(a.TextString),
+                                "prompt": str(a.PromptString)})
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+            return {"ok": True, "count": len(out), "attributes": out}
+
+        if c == "setattrs":
+            """按 tag 填块属性值。填完必须 Update()，否则图上不刷新。"""
+            br = doc.HandleToObject(str(cmd["handle"]))
+            want = dict(cmd.get("values") or {})
+            done, missing = [], list(want)
+            try:
+                atts = br.GetAttributes()
+            except Exception as e:
+                return {"ok": False, "error": "取属性失败：%s" % e}
+            for a in atts:
+                t = str(a.TagString)
+                if t in want:
+                    try:
+                        a.TextString = str(want[t])
+                        done.append(t)
+                        if t in missing:
+                            missing.remove(t)
+                    except Exception:
+                        pass
+            try:
+                br.Update()
+            except Exception:
+                pass
+            return {"ok": True, "set": done, "not_found": missing}
+
+        if c == "activestyle":
+            """把已存在的文字样式设为当前，**不动它的字体**。
+
+            标准图里的 PM-TEXT / STYLE2 / HZTXT 都是配好的，直接切过去用，
+            比自己新建样式更贴近原图（字体文件、字宽都跟着走）。
+            """
+            name = str(cmd["name"])
+            try:
+                ts = doc.TextStyles.Item(name)
+            except Exception as e:
+                return {"ok": False, "error": "没有文字样式 %r：%s" % (name, e)}
+            doc.ActiveTextStyle = ts
+            return {"ok": True, "name": str(ts.Name)}
+
+        if c == "blockbbox":
+            """算块定义里所有图元的坐标范围。
+
+            块的原点常常不在内容上（这套图框就是 —— 插到 (0,0) 后图元落在很远处），
+            所以放置前必须先把真实范围量出来。
+            块引用上的 GeometricExtents 对含属性的块会报「范围无效」，只能自己扫。
+            """
+            B = doc.Blocks.Item(str(cmd["name"]))
+            xs, ys = [], []
+            names = []
+            for i in range(int(B.Count)):
+                try:
+                    e = dynamic.Dispatch(B.Item(i))
+                    nm = str(e.ObjectName)
+                    names.append(nm)
+                except Exception:
+                    continue
+                try:
+                    if nm.endswith("Line"):
+                        for p in (e.StartPoint, e.EndPoint):
+                            xs.append(p[0]); ys.append(p[1])
+                    elif nm.endswith("Circle"):
+                        c0 = e.Center
+                        r = float(e.Radius)
+                        xs += [c0[0] - r, c0[0] + r]
+                        ys += [c0[1] - r, c0[1] + r]
+                    elif "Polyline" in nm:
+                        co = list(e.Coordinates)
+                        if nm.endswith("AcDb3dPolyline"):
+                            xs += co[0::3]; ys += co[1::3]
+                        elif nm.endswith("AcDb2dPolyline"):
+                            xs += co[0::3]; ys += co[1::3]
+                        else:
+                            xs += co[0::2]; ys += co[1::2]
+                    elif nm.endswith("Text") or nm.endswith("MText"):
+                        p = e.InsertionPoint
+                        xs.append(p[0]); ys.append(p[1])
+                    elif nm.endswith("Point"):
+                        p = e.Coordinates
+                        xs.append(p[0]); ys.append(p[1])
+                except Exception:
+                    continue
+            if not xs:
+                import collections as _c
+                return {"ok": False, "error": "块 %s 里量不到坐标" % cmd["name"],
+                        "sample_names": list(_c.Counter(names).items())[:8],
+                        "scanned": len(names)}
+            return {"ok": True, "name": str(B.Name),
+                    "min": [min(xs), min(ys)], "max": [max(xs), max(ys)],
+                    "w": max(xs) - min(xs), "h": max(ys) - min(ys),
+                    "scanned": int(B.Count)}
+
+        if c == "blockinfo":
+            """读某个块定义里的图元构成 —— 判断图框栏里都是什么。"""
+            B = doc.Blocks.Item(str(cmd["name"]))
+            items = []
+            for i in range(int(B.Count)):
+                try:
+                    items.append(_entity_info(B.Item(i)))
+                except Exception:
+                    pass
+            try:
+                base = list(B.Origin)
+            except Exception:
+                base = None
+            return {"ok": True, "name": str(B.Name), "count": len(items),
+                    "origin": base, "entities": items}
+
+        if c == "insert":
+            pt = cmd.get("point", [0, 0, 0])
+            br = ms.InsertBlock(_pt(*pt), str(cmd["name"]),
+                                float(cmd.get("xscale", 1.0)),
+                                float(cmd.get("yscale", 1.0)),
+                                float(cmd.get("zscale", 1.0)),
+                                float(cmd.get("rotation", 0.0)))
+            out = {"ok": True, "handle": br.Handle, "name": str(br.Name)}
+            db = dynamic.Dispatch(br)
+            if cmd.get("layer"):
+                db.Layer = str(cmd["layer"])
+            if cmd.get("color") is not None:
+                db.Color = int(cmd["color"])
+            return out
+
+        if c == "erase_all":
+            """清空模型空间。**如实回报失败** —— 早先这里 `except: pass`
+            把删除失败全吞了，报「erased: 1685」但其实只删掉一部分，
+            残留的图元混在新图里，看起来像是画错了。"""
+            n = int(ms.Count)
+            failed, first_err = 0, None
+            for i in range(n - 1, -1, -1):
+                try:
+                    ms.Item(i).Delete()
+                except Exception as e:
+                    failed += 1
+                    if first_err is None:
+                        first_err = str(e)
+            left = int(ms.Count)
+            out = {"ok": failed == 0, "before": n, "after": left,
+                   "erased": n - left, "failed": failed}
+            if failed:
+                out["error"] = "有 %d 个图元删不掉：%s" % (failed, first_err)
+            return out
 
         # ---------------- 图层 / 线型 / 填充 ----------------
         # 复刻工程图标准要用：图层表（名/线型/颜色）和图案填充是那套图纸的骨架。
@@ -579,25 +858,50 @@ class BridgeServer:
         # ---------------- 文字样式 ----------------
         if c == "textstyle":
             name = str(cmd.get("name", "CadBridge"))
-            font = str(cmd.get("font", "SimHei"))
-            charset = int(cmd.get("charset", 134))  # 134 = GB2312_CHARSET
             try:
                 ts = doc.TextStyles.Item(name)
             except Exception:
                 ts = doc.TextStyles.Add(name)
-            ts.SetFont(font, bool(cmd.get("bold", False)),
-                       bool(cmd.get("italic", False)), charset, 0)
+            if cmd.get("font") is not None:
+                font = str(cmd["font"])
+                charset = int(cmd.get("charset", 134))  # 134 = GB2312_CHARSET
+                # TrueType 要传**字体名**（SimHei），传文件名（simhei.ttf）会报「输入无效」
+                ok = False
+                try:
+                    ts.SetFont(font, bool(cmd.get("bold", False)),
+                               bool(cmd.get("italic", False)), charset, 0)
+                    ok = True
+                except Exception:
+                    ok = False
+                # SHX 走不通 SetFont（实测 gbenor.shx / gbcbig.shx 一律「输入无效」），
+                # 直接写 fontFile 属性才行
+                if not ok:
+                    try:
+                        ts.fontFile = font
+                        ok = True
+                    except Exception as e:
+                        return {"ok": False,
+                                "error": "设置字体失败（SetFont 与 fontFile 都不接受 %r）：%s"
+                                         % (font, e)}
+            # 中文字体是「西文 SHX + 大字库 SHX」两件套，只设前一个中文照样不显示
+            if cmd.get("bigfont") is not None:
+                try:
+                    ts.BigFontFile = str(cmd["bigfont"])
+                except Exception:
+                    pass
             try:
-                ts.Height = 0.0   # 0 = 高度不固定，由每次 AddText 指定
-                ts.Width = 1.0
+                ts.Height = float(cmd.get("height", 0.0))   # 0 = 高度不固定
+                ts.Width = float(cmd.get("width", 1.0))
             except Exception:
                 pass
             doc.ActiveTextStyle = ts
+            out = {"ok": True, "name": str(ts.Name)}
             try:
-                ffile = str(ts.fontFile)
+                out["font"] = str(ts.fontFile)
+                out["bigfont"] = str(ts.BigFontFile)
             except Exception:
-                ffile = None
-            return {"ok": True, "name": str(ts.Name), "font": ffile}
+                pass
+            return out
 
         # ---------------- 控制 ----------------
         if c == "sendcommand":
